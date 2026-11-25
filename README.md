@@ -1,10 +1,7 @@
-# MOTOATLAS Road v1.2 (Cockpit de Guiador & Motor Turn-by-Turn GPX)
+# MOTOATLAS Road v1.3 (Otimizado para iPhone 7 Plus — 5.5" 736×414 px)
 
-## Novidades da Versão 1.2
-- **Importação Direta de Ficheiros GPX (`.gpx`) com Análise Geométrica de Curvas:**
-  - Lê pontos de traçado (`<trkpt>` / `<rtept>`) e paragens (`<wpt>`), simplifica o ruído de GPS e calcula as variações de azimute ao longo da estrada.
-  - Gera automaticamente cada manobra com **seta direcional** (`↗`, `↖`, `↱`, `↰`, `↻`, `↑`, `🏁`), **ângulo da curva**, **distância exata** até à manobra e **pré-visualização "A SEGUIR"**.
-  - Inclui **seletor de sensibilidade** (`28°` Estradas Nacionais & Curvas, `42°` Equilibrado, `65°` Viragens Acentuadas & Ganchos) para recalcular a lista de manobras em tempo real.
-- **Avanço Automático por GPS & Controlo Manual de Luvas:**
-  - Quando o GPS passa a menos de 45 m da curva atual, o painel avança automaticamente para a manobra seguinte e lê a instrução por voz (`Web Speech API`) 500 m antes da próxima curva.
-  - Botões `⏮️ Anterior` e `⏭️ Próxima` no painel Turn-by-Turn para navegar pelas curvas do percurso.
+## Ajustes Específicos para iPhone 7 Plus & iOS Safari
+- **Calibração Vertical & Horizontal (414 px de altura em Landscape):** Toda a grelha do cockpit (barra HUD superior, banner da próxima paragem, lista do roadbook, seletor `Mapa + Voz` vs. `Turn-by-Turn` e botões de controlo) cabe integralmente nos `736 × 414 px` do ecrã Retina HD de 5,5" do iPhone 7 Plus sem cortes nem necessidade de fazer scroll na vista principal.
+- **Modo Ecrã Cheio iOS (`apple-mobile-web-app-capable`):** Ao adicionar ao Ecrã Principal no Safari (`Partilhar → Ecrã Principal`), abre sem barra de endereços nem separadores do Safari, ganhando ~65 px extra de altura útil.
+- **Inputs a `16px` & `inputmode="decimal"`:** Evita o zoom automático do iOS Safari ao tocar nos campos de litros, quilómetros ou valor e abre diretamente o teclado numérico.
+- **Gestão de Rotação (`orientationchange`):** Recalcula automaticamente as dimensões do mapa OpenStreetMap quando o iPhone é colocado na horizontal no suporte de guiador.
