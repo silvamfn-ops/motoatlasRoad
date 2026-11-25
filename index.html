@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="pt-PT" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>MOTOATLAS Road v1.0 — Cockpit de Guiador</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- TOP HUD BAR (COMPACTA & TOQUE LARGO PARA LUVAS) -->
+  <header class="road-hud">
+    <div class="hud-trip-info">
+      <span class="hud-code" id="hudTripCode">SEM VIAGEM</span>
+      <h1 id="hudTripTitle">MOTOATLAS Road</h1>
+      <span class="hud-sub" id="hudStageSubtitle">Importa uma viagem do Studio (Supabase ou .json)</span>
+    </div>
+
+    <div class="hud-telemetry">
+      <div class="tel-card">
+        <span class="tel-lbl">VELOCIDADE</span>
+        <strong class="tel-val" id="telSpeed">0 <small>km/h</small></strong>
+      </div>
+      <div class="tel-card">
+        <span class="tel-lbl">AUTONOMIA</span>
+        <strong class="tel-val accent" id="telRange">— <small>km</small></strong>
+      </div>
+      <div class="tel-card">
+        <span class="tel-lbl">ODÓMETRO</span>
+        <strong class="tel-val" id="telOdo">0 <small>km</small></strong>
+      </div>
+    </div>
+
+    <div class="hud-actions">
+      <button type="button" id="btnNavScreen" class="nav-pill active" data-view="view-cockpit">🧭 Cockpit</button>
+      <button type="button" id="btnNavLog" class="nav-pill" data-view="view-log">⛽ Registar</button>
+      <button type="button" id="btnNavSync" class="nav-pill" data-view="view-sync">☁️ Sync</button>
+      <button type="button" id="btnThemeToggle" class="btn-glove-icon" title="Dia / Noite">☀️</button>
+    </div>
+  </header>
+
+  <!-- VIEW 1: COCKPIT LANDSCAPE (MAPA + PRÓXIMA PARAGEM & ROADBOOK) -->
+  <main id="view-cockpit" class="road-view active">
+    <div class="cockpit-grid">
+      <!-- ESQUERDA: MAPA GPS -->
+      <section class="cockpit-map-wrap">
+        <div id="road-map"></div>
+        <div class="map-floating-controls">
+          <button type="button" id="btnToggleGps" class="btn-float">📡 GPS: OFF</button>
+          <button type="button" id="btnCenterRoute" class="btn-float">🎯 Rota</button>
+          <button type="button" id="btnOpenExternalNav" class="btn-float primary">🗺️ Abrir Maps/Organic</button>
+        </div>
+      </section>
+
+      <!-- DIREITA: ROADBOOK DE GUIADOR (TOQUE COM LUVAS) -->
+      <aside class="cockpit-roadbook">
+        <div class="next-wp-banner" id="nextWpBanner">
+          <span class="next-lbl">PRÓXIMA PARAGEM</span>
+          <strong id="nextWpTitle">—</strong>
+          <div class="next-wp-meta">
+            <span id="nextWpDist">Km —</span>
+            <button type="button" id="btnShareCoords" class="btn-glove-sm">📍 Partilhar GPS</button>
+          </div>
+        </div>
+
+        <div class="wp-scroll-list" id="roadWpList">
+          <!-- Populated by JS -->
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- VIEW 2: REGISTO RÁPIDO NA ESTRADA (COMBUSTÍVEL & DESPESAS) -->
+  <section id="view-log" class="road-view">
+    <div class="log-grid">
+      <div class="road-card">
+        <h2>⛽ Novo Registo na Estrada</h2>
+        <form id="roadExpenseForm" class="glove-form">
+          <div class="form-row-2">
+            <label>
+              Tipo
+              <select id="expCategory">
+                <option value="Combustível">⛽ Combustível</option>
+                <option value="Alimentação">🍴 Café / Refeição</option>
+                <option value="Alojamento">🏨 Dormida</option>
+                <option value="Portagem">🛣️ Portagem</option>
+                <option value="Outro">🧾 Outro</option>
+              </select>
+            </label>
+            <label>
+              Valor (€)
+              <input type="number" step="0.01" id="expAmount" placeholder="0.00" required />
+            </label>
+          </div>
+
+          <div class="form-row-3" id="fuelExtraRow">
+            <label>
+              Litros (L)
+              <input type="number" step="0.01" id="expLiters" placeholder="11.5" />
+            </label>
+            <label>
+              Parcial Trip (km)
+              <input type="number" step="0.1" id="expTripKm" placeholder="310" />
+            </label>
+            <label>
+              Pagador
+              <select id="expPayer">
+                <option value="Condutor">Condutor</option>
+                <option value="Pendura">Pendura</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            Nota / Local
+            <input type="text" id="expNote" placeholder="Ex: Repsol Ronda / Café praça" />
+          </label>
+
+          <button type="submit" class="btn-glove-primary">💾 Guardar Registo Local</button>
+        </form>
+      </div>
+
+      <div class="road-card">
+        <div class="card-head-row">
+          <h2>🧾 Registos Desta Viagem</h2>
+          <strong class="accent" id="roadTotalSpent">0.00 €</strong>
+        </div>
+        <ul class="road-exp-list" id="roadExpList"></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- VIEW 3: IMPORTAR VIAGEM & FECHAR PARA O STUDIO -->
+  <section id="view-sync" class="road-view">
+    <div class="sync-grid">
+      <!-- BLOCO 1: IMPORTAR VIAGEM ATIVA -->
+      <div class="road-card">
+        <h2>📥 1. Carregar Viagem do Studio</h2>
+        <p class="muted">Importa apenas a viagem ativa para o telemóvel trabalhar 100% offline na estrada.</p>
+
+        <div class="sync-box">
+          <label>
+            Código da Viagem (ex: ANDALUZIA-26)
+            <div class="inline-input-btn">
+              <input type="text" id="importTripCodeInput" placeholder="ANDALUZIA-26" />
+              <button type="button" id="btnPullTripByCode" class="btn-glove-primary">☁️ Descarregar</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="sync-box">
+          <label class="file-drop-glove">
+            📂 Importar Ficheiro Offline (.motoatlas.json)
+            <input type="file" id="roadJsonFileInput" accept=".json" hidden />
+          </label>
+        </div>
+      </div>
+
+      <!-- BLOCO 2: DEVOLVER DADOS NO FIM DA VIAGEM -->
+      <div class="road-card highlight">
+        <h2>📤 2. Fechar Viagem & Enviar para PC</h2>
+        <p class="muted">No final da expedição, envia as despesas, litros abastecidos e odómetro atualizado de volta para o <strong>MOTOATLAS Studio</strong>.</p>
+
+        <button type="button" id="btnPushCompletedTrip" class="btn-glove-success">🚀 Enviar Registos para o Studio (Supabase)</button>
+        <button type="button" id="btnDownloadReturnJson" class="btn-glove-outline" style="margin-top:0.6rem;">⬇️ Descarregar Ficheiro de Retorno (.json)</button>
+
+        <div id="roadSyncFeedback" class="sync-feedback"></div>
+
+        <details class="sb-details">
+          <summary>⚙️ Configurar Ligação Supabase</summary>
+          <form id="roadSbForm" class="glove-form" style="margin-top:0.6rem;">
+            <input type="url" id="roadSbUrl" placeholder="https://seu-projeto.supabase.co" required />
+            <input type="password" id="roadSbKey" placeholder="Anon Public Key" required />
+            <button type="submit" class="btn-glove-sm">Guardar Credenciais</button>
+          </form>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="app.js"></script>
+</body>
+</html>
