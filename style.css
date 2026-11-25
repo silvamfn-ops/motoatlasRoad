@@ -11,7 +11,7 @@
   --radius: 12px;
 }
 
-/* MODO SOL FORTE (ALTO CONTRASTE NO GUIADOR) */
+/* MODO SOL FORTE (ALTO CONTRASTE NA INTERFACE) */
 [data-theme="light"] {
   --bg: #ffffff;
   --surface: #f3f4f6;
@@ -160,11 +160,11 @@ body {
   flex-direction: column;
 }
 
-/* COCKPIT LANDSCAPE GRID */
+/* COCKPIT LANDSCAPE GRID: ESQUERDA ROADBOOK | DIREITA PAINEL ESTRADA & MAPA */
 .cockpit-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: 1.35fr 1fr;
+  grid-template-columns: 1fr 1.35fr;
   gap: 0.6rem;
   height: 100%;
   overflow: hidden;
@@ -173,53 +173,12 @@ body {
 @media (orientation: portrait) and (max-width: 768px) {
   .cockpit-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
+    grid-template-rows: 1fr 1.25fr;
   }
   .hud-telemetry { display: none; }
 }
 
-.cockpit-map-wrap {
-  position: relative;
-  border-radius: var(--radius);
-  overflow: hidden;
-  border: 1px solid var(--border);
-}
-
-#road-map {
-  width: 100%;
-  height: 100%;
-  z-index: 1;
-}
-
-.map-floating-controls {
-  position: absolute;
-  bottom: 0.65rem;
-  left: 0.65rem;
-  right: 0.65rem;
-  z-index: 500;
-  display: flex;
-  gap: 0.45rem;
-  flex-wrap: wrap;
-}
-
-.btn-float {
-  background: rgba(17, 24, 39, 0.92);
-  color: #ffffff;
-  border: 1px solid #4b5563;
-  padding: 0.55rem 0.8rem;
-  border-radius: 10px;
-  font-weight: 700;
-  font-size: 0.84rem;
-  cursor: pointer;
-}
-
-.btn-float.primary {
-  background: var(--accent);
-  color: #000000;
-  border-color: var(--accent);
-}
-
-/* ROADBOOK PANEL */
+/* COLUNA ESQUERDA: ROADBOOK PANEL */
 .cockpit-roadbook {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -238,17 +197,31 @@ body {
   margin-bottom: 0.55rem;
 }
 
+.next-wp-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .next-lbl {
-  display: block;
   font-size: 0.68rem;
   font-weight: 800;
   color: var(--accent);
 }
 
+.voice-badge {
+  font-size: 0.68rem;
+  font-weight: 800;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+}
+
 .next-wp-banner strong {
   display: block;
-  font-size: 1.05rem;
-  margin: 0.15rem 0 0.3rem 0;
+  font-size: 1.02rem;
+  margin: 0.2rem 0 0.35rem 0;
 }
 
 .next-wp-meta {
@@ -292,6 +265,244 @@ body {
 .wp-glove-item small {
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+/* COLUNA DIREITA: PAINEL ESTRADA & MAPA COM SELETOR DE 2 MODOS */
+.cockpit-nav-stage {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.nav-mode-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+  padding: 0.5rem;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.mode-switch-btn {
+  background: var(--surface);
+  border: 2px solid var(--border);
+  color: var(--text);
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-switch-btn.active {
+  background: var(--accent);
+  color: #000000;
+  border-color: var(--accent);
+}
+
+.nav-stage-panel {
+  display: none;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.nav-stage-panel.active {
+  display: flex;
+  flex-direction: column;
+}
+
+/* MAPA OSM STANDARD DETALHADO (INDEPENDENTE DO TEMA DA INTERFACE) */
+.osm-detailed-map {
+  width: 100%;
+  height: 100%;
+  background: #e5e3df;
+  z-index: 1;
+  transition: filter 0.2s ease;
+}
+
+/* FILTRO SUAVE DE BAIXO BRILHO NOTURNO OPCIONAL (SEM PERDER DETALHE NEM CORES DAS ESTRADAS) */
+.osm-detailed-map.night-dim-75 {
+  filter: brightness(0.75) contrast(1.08);
+}
+
+.osm-detailed-map.night-dim-55 {
+  filter: brightness(0.55) contrast(1.14);
+}
+
+.map-floating-controls {
+  position: absolute;
+  bottom: 0.65rem;
+  left: 0.65rem;
+  right: 0.65rem;
+  z-index: 500;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.btn-float {
+  background: rgba(17, 24, 39, 0.92);
+  color: #ffffff;
+  border: 1px solid #4b5563;
+  padding: 0.52rem 0.72rem;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.btn-float.primary {
+  background: var(--accent);
+  color: #000000;
+  border-color: var(--accent);
+}
+
+/* MODO B: PAINEL TURN-BY-TURN (SEMPRE ESCURO DE ALTO CONTRASTE) */
+.tbt-dark-panel {
+  background: #050811;
+  color: #ffffff;
+  padding: 0.85rem;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.tbt-top-row {
+  display: grid;
+  grid-template-columns: 1.55fr 1fr;
+  gap: 0.7rem;
+  flex: 1;
+}
+
+.tbt-maneuver-box {
+  background: #111827;
+  border: 2px solid #f59e0b;
+  border-radius: 14px;
+  padding: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.tbt-arrow {
+  font-size: 4.4rem;
+  line-height: 1;
+  font-weight: 900;
+  color: #f59e0b;
+  min-width: 78px;
+  text-align: center;
+}
+
+.tbt-dist-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.tbt-lbl {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  color: #9ca3af;
+}
+
+.tbt-distance {
+  font-size: 2.35rem;
+  font-weight: 900;
+  line-height: 1.05;
+  color: #ffffff;
+}
+
+.tbt-instruction {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #fde68a;
+  line-height: 1.25;
+}
+
+.tbt-speed-box {
+  background: #111827;
+  border: 2px solid #374151;
+  border-radius: 14px;
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.tbt-speed-val {
+  font-size: 3.3rem;
+  font-weight: 900;
+  line-height: 1;
+  color: #10b981;
+  margin: 0.25rem 0;
+}
+
+.tbt-speed-unit {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #9ca3af;
+}
+
+/* PRÉ-VISUALIZAÇÃO "A SEGUIR" */
+.tbt-after-banner {
+  background: #1f2937;
+  border-left: 6px solid #10b981;
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.tbt-after-tag {
+  background: #10b981;
+  color: #000000;
+  font-size: 0.74rem;
+  font-weight: 900;
+  padding: 0.25rem 0.55rem;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.tbt-after-banner strong {
+  font-size: 0.98rem;
+  color: #f3f4f6;
+}
+
+.tbt-bottom-actions {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 0.6rem;
+}
+
+.btn-tbt-voice {
+  background: #f59e0b;
+  color: #000000;
+  border: none;
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  font-size: 0.98rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.btn-tbt-sim {
+  background: #1f2937;
+  color: #ffffff;
+  border: 2px solid #4b5563;
+  border-radius: 12px;
+  padding: 0.85rem 0.8rem;
+  font-size: 0.9rem;
+  font-weight: 800;
+  cursor: pointer;
 }
 
 /* LOG & SYNC VIEWS */

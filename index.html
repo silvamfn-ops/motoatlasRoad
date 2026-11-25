@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>MOTOATLAS Road v1.0 — Cockpit de Guiador</title>
+  <title>MOTOATLAS Road v1.1 — Cockpit de Guiador & Turn-by-Turn</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
   <link rel="stylesheet" href="style.css" />
@@ -36,30 +36,23 @@
       <button type="button" id="btnNavScreen" class="nav-pill active" data-view="view-cockpit">🧭 Cockpit</button>
       <button type="button" id="btnNavLog" class="nav-pill" data-view="view-log">⛽ Registar</button>
       <button type="button" id="btnNavSync" class="nav-pill" data-view="view-sync">☁️ Sync</button>
-      <button type="button" id="btnThemeToggle" class="btn-glove-icon" title="Dia / Noite">☀️</button>
+      <button type="button" id="btnThemeToggle" class="btn-glove-icon" title="Dia / Noite Interface">☀️</button>
     </div>
   </header>
 
-  <!-- VIEW 1: COCKPIT LANDSCAPE (MAPA + PRÓXIMA PARAGEM & ROADBOOK) -->
+  <!-- VIEW 1: COCKPIT LANDSCAPE (ROADBOOK ESQUERDA + SELETOR MAPA/VOZ VS TURN-BY-TURN DIREITA) -->
   <main id="view-cockpit" class="road-view active">
     <div class="cockpit-grid">
-      <!-- ESQUERDA: MAPA GPS -->
-      <section class="cockpit-map-wrap">
-        <div id="road-map"></div>
-        <div class="map-floating-controls">
-          <button type="button" id="btnToggleGps" class="btn-float">📡 GPS: OFF</button>
-          <button type="button" id="btnCenterRoute" class="btn-float">🎯 Rota</button>
-          <button type="button" id="btnOpenExternalNav" class="btn-float primary">🗺️ Abrir Maps/Organic</button>
-        </div>
-      </section>
-
-      <!-- DIREITA: ROADBOOK DE GUIADOR (TOQUE COM LUVAS) -->
+      <!-- ESQUERDA: ROADBOOK DE GUIADOR (TOQUE COM LUVAS) -->
       <aside class="cockpit-roadbook">
         <div class="next-wp-banner" id="nextWpBanner">
-          <span class="next-lbl">PRÓXIMA PARAGEM</span>
+          <div class="next-wp-top">
+            <span class="next-lbl">PRÓXIMA PARAGEM DO ROADBOOK</span>
+            <span class="voice-badge" id="voiceStatusBadge">🔊 Voz Auto: ON</span>
+          </div>
           <strong id="nextWpTitle">—</strong>
           <div class="next-wp-meta">
-            <span id="nextWpDist">Km —</span>
+            <span id="nextWpDist">Marco: Km —</span>
             <button type="button" id="btnShareCoords" class="btn-glove-sm">📍 Partilhar GPS</button>
           </div>
         </div>
@@ -68,6 +61,66 @@
           <!-- Populated by JS -->
         </div>
       </aside>
+
+      <!-- DIREITA: PAINEL ESTRADA & MAPA COM SELETOR DE DOIS MODOS -->
+      <section class="cockpit-nav-stage">
+        <!-- SELETOR RÁPIDO PARA LUVAS: MAPA + VOZ VS TURN-BY-TURN -->
+        <div class="nav-mode-switcher" role="tablist" aria-label="Modo de Navegação">
+          <button type="button" id="btnModeMapVoice" class="mode-switch-btn active" data-mode="map-voice">
+            🗺️ Mapa + Voz
+          </button>
+          <button type="button" id="btnModeTurnByTurn" class="mode-switch-btn" data-mode="turn-by-turn">
+            🧭 Turn-by-Turn
+          </button>
+        </div>
+
+        <!-- MODO A: MAPA DETALHADO OSM STANDARD (INDEPENDENTE DO TEMA) + VOZ AUTOMÁTICA -->
+        <div id="panelMapVoice" class="nav-stage-panel active">
+          <div id="road-map" class="osm-detailed-map"></div>
+          <div class="map-floating-controls">
+            <button type="button" id="btnToggleGps" class="btn-float">📡 GPS: OFF</button>
+            <button type="button" id="btnCenterRoute" class="btn-float">🎯 Rota</button>
+            <button type="button" id="btnMapNightDim" class="btn-float" title="Filtro suave noturno no mapa sem perder detalhe">🌘 Brilho Mapa: 100%</button>
+            <button type="button" id="btnToggleAutoVoice" class="btn-float primary">🔊 Voz: ON</button>
+          </div>
+        </div>
+
+        <!-- MODO B: PAINEL TURN-BY-TURN (ECRÃ ESCURO DE ALTO CONTRASTE) -->
+        <div id="panelTurnByTurn" class="nav-stage-panel tbt-dark-panel">
+          <div class="tbt-top-row">
+            <div class="tbt-maneuver-box">
+              <div class="tbt-arrow" id="tbtArrow">↑</div>
+              <div class="tbt-dist-wrap">
+                <span class="tbt-lbl">DISTÂNCIA À MANOBRA</span>
+                <strong class="tbt-distance" id="tbtDistance">0 m</strong>
+                <span class="tbt-instruction" id="tbtInstruction">Segue em frente pela rota</span>
+              </div>
+            </div>
+
+            <div class="tbt-speed-box">
+              <span class="tbt-lbl">VELOCIDADE GPS</span>
+              <strong class="tbt-speed-val" id="tbtSpeedBig">0</strong>
+              <span class="tbt-speed-unit">km/h</span>
+            </div>
+          </div>
+
+          <!-- PRÉ-VISUALIZAÇÃO DA MANOBRA SEGUINTE ("A SEGUIR") -->
+          <div class="tbt-after-banner">
+            <span class="tbt-after-tag">A SEGUIR</span>
+            <strong id="tbtNextPreview">Depois: mantém trajetória até ao próximo ponto</strong>
+          </div>
+
+          <!-- CONTROLOS DE LUVAS NO TURN-BY-TURN -->
+          <div class="tbt-bottom-actions">
+            <button type="button" id="btnTbtRepeatVoice" class="btn-tbt-voice">
+              🔊 Repetir Instrução no Intercomunicador
+            </button>
+            <button type="button" id="btnTbtNextStep" class="btn-tbt-sim" title="Avançar manobra manualmente se estiver sem GPS">
+              ⏭️ Próxima Manobra
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   </main>
 

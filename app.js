@@ -1,4 +1,4 @@
-// MOTOATLAS Road v1.0 — Cockpit Leve de Guiador (100% Offline-First + Sync com MOTOATLAS Studio)
+// MOTOATLAS Road v1.1 — Cockpit de Guiador (Mapa OSM Detalhado + Voz Auto + Painel Turn-by-Turn)
 const ROAD_ACTIVE_TRIP_KEY = 'motoatlas_road_v1_active_trip';
 const ROAD_DONE_WPS_KEY = 'motoatlas_road_v1_done_wps';
 const SB_URL_KEY = 'motoatlas_supabase_url';
@@ -15,11 +15,56 @@ const DEFAULT_DEMO_TRIP = {
   tankCapacityL: 14.1,
   avgConsumptionL100: 3.8,
   waypoints: [
-    { name: 'Partida: Lisboa (Ponte Vasco da Gama)', type: 'start', lat: 38.7586, lng: -9.0375, km: 0 },
-    { name: 'Café & Reagrupamento: Évora', type: 'viewpoint', lat: 38.5714, lng: -7.9135, km: 132 },
-    { name: 'Abastecimento: Repsol Mérida', type: 'fuel', lat: 38.9161, lng: -6.3437, km: 285 },
-    { name: 'Paragem Cultural: Zafra (Plaza Grande)', type: 'monument', lat: 38.4261, lng: -6.4184, km: 348 },
-    { name: 'Chegada / Dormida: Córdoba', type: 'sleep', lat: 37.8882, lng: -4.7794, km: 485 }
+    {
+      name: 'Partida: Lisboa (Ponte Vasco da Gama)',
+      type: 'start',
+      lat: 38.7586,
+      lng: -9.0375,
+      km: 0,
+      arrow: '↑',
+      maneuver: 'Segue em frente pela A12 / N4 direção Évora',
+      afterPreview: 'Depois: saída N114 a 400 m → direção Évora Centro'
+    },
+    {
+      name: 'Café & Reagrupamento: Évora',
+      type: 'viewpoint',
+      lat: 38.5714,
+      lng: -7.9135,
+      km: 132,
+      arrow: '↱',
+      maneuver: 'Vira à direita na N18 direção Estremoz / Badajoz',
+      afterPreview: 'Depois: rotunda a 350 m → 2.ª saída direção Mérida'
+    },
+    {
+      name: 'Abastecimento: Repsol Mérida',
+      type: 'fuel',
+      lat: 38.9161,
+      lng: -6.3437,
+      km: 285,
+      arrow: '↻',
+      maneuver: 'Na rotunda da Repsol, sai na 2.ª saída para a N-630',
+      afterPreview: 'Depois: curva fechada à esquerda a 500 m → direção Zafra'
+    },
+    {
+      name: 'Paragem Cultural: Zafra (Plaza Grande)',
+      type: 'monument',
+      lat: 38.4261,
+      lng: -6.4184,
+      km: 348,
+      arrow: '↰',
+      maneuver: 'Vira à esquerda para a N-432 direção Córdoba',
+      afterPreview: 'Depois: travessia de serra a 800 m → reduz para 2.ª/3.ª caixa'
+    },
+    {
+      name: 'Chegada / Dormida: Córdoba',
+      type: 'sleep',
+      lat: 37.8882,
+      lng: -4.7794,
+      km: 485,
+      arrow: '🏁',
+      maneuver: 'Chegada ao destino: Córdoba (Hotel / Centro Histórico)',
+      afterPreview: 'Fim da etapa de hoje — estacionamento e descanso'
+    }
   ],
   routeCoords: [
     [38.7586, -9.0375],
@@ -50,6 +95,12 @@ let markersLayer = null;
 let gpsMarker = null;
 let gpsWatchId = null;
 let currentCoords = null;
+let currentSpeedKmh = 0;
+
+// Estado de Voz & Contraste do Mapa
+let autoVoiceEnabled = true;
+let announcedWpIndices = new Set();
+let mapDimLevel = 0; // 0 = 100%, 1 = 75%, 2 = 55%
 
 function loadRoadTrip() {
   try {
@@ -66,14 +117,15 @@ function saveRoadTrip() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  initNavigation();
+  initTopNavigation();
+  initNavModeSwitcher();
   initMap();
   loadSbInputs();
   renderAllRoadUI();
   bindEvents();
 });
 
-function initNavigation() {
+function initTopNavigation() {
   document.querySelectorAll('.nav-pill').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.nav-pill').forEach(b => b.classList.remove('active'));
@@ -87,14 +139,129 @@ function initNavigation() {
   });
 }
 
+// --- SELETOR DE DOIS MODOS NO PAINEL DIREITO (MAPA + VOZ VS TURN-BY-TURN) ---
+function initNavModeSwitcher() {
+  const btnMap = document.getElementById('btnModeMapVoice');
+  const btnTbt = document.getElementById('btnModeTurnByTurn');
+  const panelMap = document.getElementById('panelMapVoice');
+  const panelTbt = document.getElementById('panelTurnByTurn');
+
+  btnMap.addEventListener('click', () => {
+    btnMap.classList.add('active');
+    btnTbt.classList.remove('active');
+    panelMap.classList.add('active');
+    panelTbt.classList.remove('active');
+    if (map) setTimeout(() => map.invalidateSize(), 80);
+  });
+
+  btnTbt.addEventListener('click', () => {
+    btnTbt.classList.add('active');
+    btnMap.classList.remove('active');
+    panelTbt.classList.add('active');
+    panelMap.classList.remove('active');
+    updateTurnByTurnPanel();
+  });
+}
+
+// --- MAPA OSM STANDARD SEMPRE DETALHADO E INDEPENDENTE DO TEMA ---
 function initMap() {
   map = L.map('road-map', { zoomControl: false }).setView([38.5, -8.0], 7);
+  // Mosaico OpenStreetMap Standard gratuito, sem API Key, com todo o detalhe de estradas nacionais, curvas e localidades
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    attribution: '&copy; OSM'
+    attribution: '&copy; OpenStreetMap'
   }).addTo(map);
   routeLayer = L.layerGroup().addTo(map);
   markersLayer = L.layerGroup().addTo(map);
+}
+
+// --- WEB SPEECH API (SÍNTESE DE VOZ PARA INTERCOMUNICADOR) ---
+function speakInstruction(text) {
+  if (!('speechSynthesis' in window) || !text) return;
+  try {
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'pt-PT';
+    utter.rate = 1.02;
+    utter.pitch = 1.0;
+    window.speechSynthesis.speak(utter);
+  } catch (err) {
+    console.warn('Falha na síntese de voz:', err);
+  }
+}
+
+// --- CÁLCULO GEODÉSICO DE DISTÂNCIA (HAVERSINE EM METROS) ---
+function calcDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = deg => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function formatDistanceLabel(meters) {
+  if (meters >= 1000) {
+    return `${(meters / 1000).toFixed(1)} km`;
+  }
+  return `${Math.max(0, Math.round(meters / 10) * 10)} m`;
+}
+
+function getNextWaypointData() {
+  const wps = activeTrip.waypoints || [];
+  if (wps.length === 0) return { wp: null, idx: -1, nextWp: null };
+  const idx = wps.findIndex((_, i) => !doneWps.includes(i));
+  const activeIdx = idx !== -1 ? idx : wps.length - 1;
+  const wp = wps[activeIdx];
+  const nextWp = activeIdx + 1 < wps.length ? wps[activeIdx + 1] : null;
+  return { wp, idx: activeIdx, nextWp };
+}
+
+function inferManeuverFromWaypoint(wp, nextWp) {
+  const arrow = wp.arrow || (wp.type === 'fuel' ? '↻' : wp.type === 'sleep' ? '🏁' : '↱');
+  const instruction = wp.maneuver || `${wp.name} (Marco Km ${wp.km})`;
+  const afterPreview = wp.afterPreview || (nextWp
+    ? `Depois: segue para ${nextWp.name} (Km ${nextWp.km})`
+    : 'Depois: chegada ao destino final da etapa');
+  return { arrow, instruction, afterPreview };
+}
+
+function updateTurnByTurnPanel() {
+  const { wp, idx, nextWp } = getNextWaypointData();
+  document.getElementById('tbtSpeedBig').textContent = currentSpeedKmh;
+
+  if (!wp) {
+    document.getElementById('tbtArrow').textContent = '↑';
+    document.getElementById('tbtDistance').textContent = '—';
+    document.getElementById('tbtInstruction').textContent = 'Sem pontos carregados';
+    document.getElementById('tbtNextPreview').textContent = 'Importa uma rota no separador Sync';
+    return;
+  }
+
+  const { arrow, instruction, afterPreview } = inferManeuverFromWaypoint(wp, nextWp);
+  document.getElementById('tbtArrow').textContent = arrow;
+  document.getElementById('tbtInstruction').textContent = instruction;
+  document.getElementById('tbtNextPreview').textContent = afterPreview;
+
+  let distMeters = null;
+  if (currentCoords && wp.lat && wp.lng) {
+    distMeters = calcDistanceMeters(currentCoords[0], currentCoords[1], wp.lat, wp.lng);
+    document.getElementById('tbtDistance').textContent = formatDistanceLabel(distMeters);
+  } else {
+    // Fallback simulado pelo marco quilométrico do roadbook quando o GPS está desligado
+    const prevWp = idx > 0 ? activeTrip.waypoints[idx - 1] : { km: 0 };
+    const deltaKm = Math.max(0, (wp.km || 0) - (prevWp.km || 0));
+    document.getElementById('tbtDistance').textContent = deltaKm > 0 ? `${deltaKm} km` : '0 m';
+  }
+
+  // Disparo automático de voz ao aproximar-se de uma curva/ponto (< 600 m com GPS ativo)
+  if (autoVoiceEnabled && distMeters !== null && distMeters <= 600 && !announcedWpIndices.has(idx)) {
+    announcedWpIndices.add(idx);
+    speakInstruction(`A ${formatDistanceLabel(distMeters)}, ${instruction}. ${afterPreview}`);
+  }
 }
 
 function renderAllRoadUI() {
@@ -116,6 +283,7 @@ function renderAllRoadUI() {
 
   renderMap();
   renderRoadbookList();
+  updateTurnByTurnPanel();
   renderRoadExpenses();
 }
 
@@ -129,12 +297,12 @@ function renderMap() {
     : (activeTrip.waypoints || []).map(w => [w.lat, w.lng]);
 
   if (coords.length > 1) {
-    const poly = L.polyline(coords, { color: '#f59e0b', weight: 6, opacity: 0.95 }).addTo(routeLayer);
+    const poly = L.polyline(coords, { color: '#d97706', weight: 6, opacity: 0.95 }).addTo(routeLayer);
     map.fitBounds(poly.getBounds(), { padding: [22, 22] });
   }
 
   (activeTrip.waypoints || []).forEach((wp, idx) => {
-    const iconHtml = `<div style="font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.8))">${PIN_ICONS[wp.type] || '📍'}</div>`;
+    const iconHtml = `<div style="font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.85))">${PIN_ICONS[wp.type] || '📍'}</div>`;
     const icon = L.divIcon({ html: iconHtml, className: 'road-pin', iconSize: [26, 26] });
     L.marker([wp.lat, wp.lng], { icon })
       .bindPopup(`<strong>${idx + 1}. ${wp.name}</strong><br/>Km ${wp.km}`)
@@ -147,9 +315,7 @@ function renderRoadbookList() {
   const wps = activeTrip.waypoints || [];
   listEl.innerHTML = '';
 
-  const nextIdx = wps.findIndex((_, i) => !doneWps.includes(i));
-  const nextWp = nextIdx !== -1 ? wps[nextIdx] : wps[wps.length - 1];
-
+  const { wp: nextWp } = getNextWaypointData();
   if (nextWp) {
     document.getElementById('nextWpTitle').textContent = `${PIN_ICONS[nextWp.type] || '📍'} ${nextWp.name}`;
     document.getElementById('nextWpDist').textContent = `Marco: Km ${nextWp.km}`;
@@ -174,6 +340,7 @@ function renderRoadbookList() {
       }
       saveRoadTrip();
       renderRoadbookList();
+      updateTurnByTurnPanel();
     });
     listEl.appendChild(row);
   });
@@ -204,14 +371,16 @@ function renderRoadExpenses() {
       `).join('');
 }
 
-// --- GPS LIVE ---
+// --- GPS LIVE (ALIMENTA MAPA, VELOCIDADE E TURN-BY-TURN) ---
 function toggleGps() {
   const btn = document.getElementById('btnToggleGps');
   if (gpsWatchId !== null) {
     navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
+    currentSpeedKmh = 0;
     btn.textContent = '📡 GPS: OFF';
     document.getElementById('telSpeed').innerHTML = `0 <small>km/h</small>`;
+    document.getElementById('tbtSpeedBig').textContent = '0';
     return;
   }
 
@@ -225,8 +394,10 @@ function toggleGps() {
     (pos) => {
       const { latitude, longitude, speed } = pos.coords;
       currentCoords = [latitude, longitude];
-      const kmh = speed ? Math.round(speed * 3.6) : 0;
-      document.getElementById('telSpeed').innerHTML = `${kmh} <small>km/h</small>`;
+      currentSpeedKmh = speed !== null && !Number.isNaN(speed) ? Math.round(speed * 3.6) : 0;
+
+      document.getElementById('telSpeed').innerHTML = `${currentSpeedKmh} <small>km/h</small>`;
+      document.getElementById('tbtSpeedBig').textContent = currentSpeedKmh;
 
       if (!gpsMarker) {
         const motoIcon = L.divIcon({
@@ -239,11 +410,12 @@ function toggleGps() {
         gpsMarker.setLatLng(currentCoords);
       }
       map.panTo(currentCoords);
+      updateTurnByTurnPanel();
     },
     (err) => {
       alert(`Erro GPS: ${err.message}`);
     },
-    { enableHighAccuracy: true, maximumAge: 3000 }
+    { enableHighAccuracy: true, maximumAge: 2000 }
   );
 }
 
@@ -287,6 +459,7 @@ async function pullTripByCodeFromSupabase() {
     }
     activeTrip = rows[0].payload;
     doneWps = [];
+    announcedWpIndices.clear();
     saveRoadTrip();
     renderAllRoadUI();
     fb.textContent = `✅ Viagem "${activeTrip.tripTitle}" carregada e pronta a rodar offline!`;
@@ -330,28 +503,78 @@ async function pushCompletedTripBackToStudio() {
 }
 
 function bindEvents() {
+  // Tema da interface (NÃO altera o detalhe nem o servidor do mapa OSM Standard)
   document.getElementById('btnThemeToggle').addEventListener('click', () => {
     const curr = document.documentElement.getAttribute('data-theme');
     document.documentElement.setAttribute('data-theme', curr === 'dark' ? 'light' : 'dark');
   });
 
+  // Filtro opcional de brilho no contentor do mapa sem perder detalhe nem exigir API Key
+  document.getElementById('btnMapNightDim').addEventListener('click', (e) => {
+    const mapEl = document.getElementById('road-map');
+    mapDimLevel = (mapDimLevel + 1) % 3;
+    mapEl.classList.remove('night-dim-75', 'night-dim-55');
+    if (mapDimLevel === 0) {
+      e.target.textContent = '🌘 Brilho Mapa: 100%';
+    } else if (mapDimLevel === 1) {
+      mapEl.classList.add('night-dim-75');
+      e.target.textContent = '🌘 Brilho Mapa: 75%';
+    } else {
+      mapEl.classList.add('night-dim-55');
+      e.target.textContent = '🌘 Brilho Mapa: 55%';
+    }
+  });
+
+  // Ligar/Desligar leitura automática por voz
+  document.getElementById('btnToggleAutoVoice').addEventListener('click', (e) => {
+    autoVoiceEnabled = !autoVoiceEnabled;
+    e.target.textContent = autoVoiceEnabled ? '🔊 Voz: ON' : '🔇 Voz: OFF';
+    document.getElementById('voiceStatusBadge').textContent = autoVoiceEnabled ? '🔊 Voz Auto: ON' : '🔇 Voz Auto: OFF';
+    if (autoVoiceEnabled) {
+      const { wp, nextWp } = getNextWaypointData();
+      if (wp) {
+        const { instruction } = inferManeuverFromWaypoint(wp, nextWp);
+        speakInstruction(`Voz ativada. Próximo ponto: ${instruction}`);
+      }
+    } else if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  });
+
+  // Botão Turn-by-Turn: Repetir instrução no intercomunicador
+  document.getElementById('btnTbtRepeatVoice').addEventListener('click', () => {
+    const { wp, nextWp } = getNextWaypointData();
+    if (!wp) return;
+    const dist = document.getElementById('tbtDistance').textContent;
+    const { instruction, afterPreview } = inferManeuverFromWaypoint(wp, nextWp);
+    speakInstruction(`A ${dist}, ${instruction}. ${afterPreview}`);
+  });
+
+  // Botão Turn-by-Turn: Avançar para a próxima manobra do roadbook
+  document.getElementById('btnTbtNextStep').addEventListener('click', () => {
+    const { idx } = getNextWaypointData();
+    if (idx !== -1 && !doneWps.includes(idx)) {
+      doneWps.push(idx);
+      saveRoadTrip();
+      renderRoadbookList();
+      updateTurnByTurnPanel();
+      if (autoVoiceEnabled) {
+        const nextData = getNextWaypointData();
+        if (nextData.wp) {
+          const { instruction, afterPreview } = inferManeuverFromWaypoint(nextData.wp, nextData.nextWp);
+          speakInstruction(`Próxima manobra: ${instruction}. ${afterPreview}`);
+        }
+      }
+    }
+  });
+
   document.getElementById('btnToggleGps').addEventListener('click', toggleGps);
   document.getElementById('btnCenterRoute').addEventListener('click', renderMap);
 
-  document.getElementById('btnOpenExternalNav').addEventListener('click', () => {
-    const wps = activeTrip.waypoints || [];
-    const nextIdx = wps.findIndex((_, i) => !doneWps.includes(i));
-    const target = nextIdx !== -1 ? wps[nextIdx] : wps[wps.length - 1];
-    if (!target) return;
-    window.open(`https://www.google.com/maps/dir/?api=1&destination=${target.lat},${target.lng}&travelmode=driving`, '_blank');
-  });
-
   document.getElementById('btnShareCoords').addEventListener('click', () => {
-    const wps = activeTrip.waypoints || [];
-    const nextIdx = wps.findIndex((_, i) => !doneWps.includes(i));
-    const target = nextIdx !== -1 ? wps[nextIdx] : wps[0];
-    const lat = currentCoords ? currentCoords[0] : target?.lat;
-    const lng = currentCoords ? currentCoords[1] : target?.lng;
+    const { wp } = getNextWaypointData();
+    const lat = currentCoords ? currentCoords[0] : wp?.lat;
+    const lng = currentCoords ? currentCoords[1] : wp?.lng;
     if (!lat || !lng) return;
     const msg = `MOTOATLAS (${activeTrip.tripCode}): https://maps.google.com/?q=${lat.toFixed(5)},${lng.toFixed(5)}`;
     if (navigator.share) {
@@ -404,6 +627,7 @@ ${msg}`);
     const parsed = JSON.parse(await file.text());
     activeTrip = parsed.trip ? parsed.trip : parsed;
     doneWps = [];
+    announcedWpIndices.clear();
     saveRoadTrip();
     renderAllRoadUI();
     document.getElementById('roadSyncFeedback').textContent = `✅ Viagem "${activeTrip.tripTitle}" importada do ficheiro!`;
