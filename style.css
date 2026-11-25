@@ -203,7 +203,7 @@ body {
 .cockpit-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: 0.94fr 1.46fr;
+  grid-template-columns: 0.96fr 1.44fr;
   gap: 0.45rem;
   height: 100%;
   overflow: hidden;
@@ -285,6 +285,14 @@ body {
   color: var(--success) !important;
 }
 
+.start-here-btn {
+  background: rgba(245, 158, 11, 0.22) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  font-weight: 800 !important;
+  white-space: nowrap;
+}
+
 .wp-scroll-list {
   flex: 1;
   overflow-y: auto;
@@ -305,7 +313,7 @@ body {
   align-items: center;
   gap: 0.35rem;
   cursor: pointer;
-  min-height: 44px;
+  min-height: 46px;
 }
 
 .wp-glove-item.done {
@@ -313,15 +321,20 @@ body {
   text-decoration: line-through;
 }
 
+.wp-glove-item.active-start {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .wp-glove-item strong {
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   display: block;
   line-height: 1.2;
 }
 
 .wp-glove-item small {
   color: var(--muted);
-  font-size: 0.66rem;
+  font-size: 0.65rem;
 }
 
 .wp-item-actions {
@@ -760,8 +773,8 @@ input, select {
 }
 
 .btn-glove-sm {
-  padding: 0.28rem 0.45rem;
-  font-size: 0.72rem;
+  padding: 0.28rem 0.42rem;
+  font-size: 0.7rem;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);

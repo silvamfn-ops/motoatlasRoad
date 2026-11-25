@@ -1,4 +1,4 @@
-// MOTOATLAS Road v1.4.1 — Roteamento Real OSRM (Ruas, Rotundas, Recálculo), Cache Offline, Voz Tripla (1000m/300m/50m) & Organic Maps
+// MOTOATLAS Road v1.4.2 — Botão Direto "Iniciar Aqui" no Roadbook, Roteamento OSRM, Cache Offline, Voz Tripla & Organic Maps
 const ROAD_ACTIVE_TRIP_KEY = 'motoatlas_road_v1_active_trip';
 const ROAD_DONE_WPS_KEY = 'motoatlas_road_v1_done_wps';
 const SB_URL_KEY = 'motoatlas_supabase_url';
@@ -60,7 +60,6 @@ let currentSpeedKmh = 0;
 // Estado de Navegação Turn-by-Turn, Voz Tripla & Recálculo
 let activeTbtIndex = 0;
 let autoVoiceEnabled = true;
-// Mapa de estágios de voz já anunciados por índice de manobra: { [stepIdx]: Set(['1000', '300', '50']) }
 let announcedStages = new Map();
 let mapDimLevel = 0;
 let isRecalculating = false;
@@ -601,6 +600,82 @@ async function ensureTurnStepsReady() {
   activeTbtIndex = (activeTrip.tbtSteps && activeTrip.tbtSteps.length > 1) ? 1 : 0;
 }
 
+// --- INICIAR VIAGEM A PARTIR DE UM PONTO ESPECÍFICO DO ROADBOOK ("INICIAR AQUI") ---
+window.startTripFromWaypoint = async function(wpIdx) {
+  const wps = activeTrip.waypoints || [];
+  const selectedWp = wps[wpIdx];
+  if (!selectedWp) return;
+
+  // 1. Marca o ponto selecionado e todos os anteriores como concluídos (a menos que seja o último ponto)
+  const newDone = [];
+  const cutoff = wpIdx < wps.length - 1 ? wpIdx : wpIdx - 1;
+  for (let i = 0; i <= cutoff; i++) {
+    newDone.push(i);
+  }
+  doneWps = newDone;
+  announcedStages.clear();
+
+  // 2. Define os pontos restantes a partir do ponto X até ao fim da etapa
+  const remainingWps = wps.slice(wpIdx);
+
+  // 3. Ativa GPS em tempo real automaticamente se ainda estiver desligado
+  if (gpsWatchId === null) {
+    toggleGps();
+  }
+
+  // 4. Recalcula a rota e as manobras Turn-by-Turn a partir deste ponto X
+  if (remainingWps.length >= 2) {
+    const routePts = currentCoords
+      ? [currentCoords, ...remainingWps.slice(1).map(w => [w.lat, w.lng])]
+      : remainingWps.map(w => [w.lat, w.lng]);
+    const routeMeta = currentCoords
+      ? [{ name: selectedWp.name, type: 'start' }, ...remainingWps.slice(1)]
+      : remainingWps;
+
+    try {
+      const osrmResult = await buildOsrmRouteFromPoints(routePts, routeMeta);
+      activeTrip.routeCoords = osrmResult.routeCoords;
+      activeTrip.tbtSteps = osrmResult.tbtSteps;
+      activeTrip.routingEngine = 'osrm';
+      activeTrip.stageSubtitle = `Desde ${selectedWp.name} • ${osrmResult.totalDistKm} km`;
+      activeTbtIndex = osrmResult.tbtSteps.length > 1 ? 1 : 0;
+    } catch {
+      // Fallback offline: salta para a instrução mais próxima do ponto selecionado
+      const steps = activeTrip.tbtSteps || [];
+      let bestStepIdx = 0;
+      let bestDist = Infinity;
+      steps.forEach((st, sIdx) => {
+        const d = calcDistanceMeters(selectedWp.lat, selectedWp.lng, st.lat, st.lng);
+        if (d < bestDist) {
+          bestDist = d;
+          bestStepIdx = sIdx;
+        }
+      });
+      activeTbtIndex = Math.min(bestStepIdx + 1, Math.max(0, steps.length - 1));
+    }
+  } else {
+    // Último ponto da lista
+    const steps = activeTrip.tbtSteps || [];
+    activeTbtIndex = Math.max(0, steps.length - 1);
+  }
+
+  saveRoadTrip();
+  renderAllRoadUI();
+
+  if (map) {
+    map.setView([selectedWp.lat, selectedWp.lng], 14);
+  }
+
+  const nextWp = getNextPendingWaypoint();
+  const nextStep = (activeTrip.tbtSteps || [])[activeTbtIndex];
+  if (autoVoiceEnabled) {
+    const voiceMsg = nextStep
+      ? `Viagem iniciada em ${selectedWp.name}. Próxima direção: ${nextStep.instruction}.`
+      : `Viagem iniciada em ${selectedWp.name}, rumo a ${nextWp?.name || 'destino'}.`;
+    speakInstruction(voiceMsg);
+  }
+};
+
 // --- RECÁLCULO AUTOMÁTICO QUANDO O CONDUTOR SAI DA ROTA (> 85 METROS) ---
 async function triggerAutoRecalculate() {
   if (!currentCoords || isRecalculating) return;
@@ -822,6 +897,7 @@ function renderRoadbookList() {
         <small>Km ${wp.km}</small>
       </div>
       <div class="wp-item-actions">
+        <button type="button" class="btn-glove-sm start-here-btn" title="Iniciar viagem a partir deste ponto" onclick="event.stopPropagation(); startTripFromWaypoint(${idx})">▶️ Iniciar Aqui</button>
         <button type="button" class="btn-glove-sm" title="Centrar no mapa" onclick="event.stopPropagation(); focusRoadWp(${idx})">🎯</button>
         <button type="button" class="btn-glove-sm organic-btn" title="Navegar no Organic Maps" onclick="event.stopPropagation(); openWpOrganic(${idx})">🗺️</button>
       </div>
@@ -925,7 +1001,7 @@ function exportActiveRouteAsGpx() {
   const trkXml = coords.map(([lat, lng]) => `      <trkpt lat="${lat}" lon="${lng}"></trkpt>`).join('\n');
 
   const gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="MOTOATLAS Road v1.4.1" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="MOTOATLAS Road v1.4.2" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata><name>${esc(activeTrip.tripTitle)}</name></metadata>
 ${wptXml}
   <trk>
