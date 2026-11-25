@@ -1,4 +1,4 @@
-// MOTOATLAS Road v1.4 — Roteamento Real OSRM (Ruas, Rotundas, Recálculo), Cache Offline, Voz Tripla (1000m/300m/50m) & Organic Maps
+// MOTOATLAS Road v1.4.1 — Roteamento Real OSRM (Ruas, Rotundas, Recálculo), Cache Offline, Voz Tripla (1000m/300m/50m) & Organic Maps
 const ROAD_ACTIVE_TRIP_KEY = 'motoatlas_road_v1_active_trip';
 const ROAD_DONE_WPS_KEY = 'motoatlas_road_v1_done_wps';
 const SB_URL_KEY = 'motoatlas_supabase_url';
@@ -207,7 +207,7 @@ function calcDistanceMeters(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function calcBearingDeg(lat1, lon1, lat2, lon2) {
@@ -228,7 +228,6 @@ function normalizeTurnAngle(bearing1, bearing2) {
 function distanceToRouteMeters(lat, lng, coords) {
   if (!coords || coords.length === 0) return 0;
   let minD = Infinity;
-  // Amostragem rápida em rotas muito longas
   const step = coords.length > 1500 ? 3 : 1;
   for (let i = 0; i < coords.length; i += step) {
     const d = calcDistanceMeters(lat, lng, coords[i][0], coords[i][1]);
@@ -401,7 +400,6 @@ async function buildOsrmRouteFromPoints(pointsLatLng, waypointsMeta = []) {
     throw new Error('São necessários pelo menos 2 pontos para calcular a rota.');
   }
 
-  // OSRM aceita até ~25 waypoints confortavelmente na URL pública
   let sampledPoints = pointsLatLng;
   if (pointsLatLng.length > 22) {
     const step = (pointsLatLng.length - 1) / 21;
@@ -438,7 +436,6 @@ async function buildOsrmRouteFromPoints(pointsLatLng, waypointsMeta = []) {
       const isLastInLeg = stepIdx === leg.steps.length - 1;
       const isFinalArrival = isLastInLeg && legIdx === route.legs.length - 1;
 
-      // Ignorar passos intermédios de chegada entre waypoints que não sejam o destino final
       if (isLastInLeg && !isFinalArrival) {
         if (destWp) {
           tbtSteps.push({
@@ -608,7 +605,7 @@ async function ensureTurnStepsReady() {
 async function triggerAutoRecalculate() {
   if (!currentCoords || isRecalculating) return;
   const now = Date.now();
-  if (now - lastRecalcTimestamp < 15000) return; // Evita spam de pedidos (cooldown 15s)
+  if (now - lastRecalcTimestamp < 15000) return;
 
   isRecalculating = true;
   lastRecalcTimestamp = now;
@@ -690,21 +687,18 @@ function updateTurnByTurnPanel() {
     distMeters = calcDistanceMeters(currentCoords[0], currentCoords[1], step.lat, step.lng);
     document.getElementById('tbtDistance').textContent = formatDistanceLabel(distMeters);
 
-    // Destaque visual vermelho nos últimos 120 metros antes da viragem
     if (distMeters <= 120) {
       box.classList.add('imminent');
     } else {
       box.classList.remove('imminent');
     }
 
-    // Avançar automaticamente ao passar a menos de 35m do ponto de manobra
     if (distMeters <= 35 && activeTbtIndex < steps.length - 1) {
       activeTbtIndex += 1;
       updateTurnByTurnPanel();
       return;
     }
 
-    // Sistema de Voz Antecipada em 3 Estágios (1000m, 300m, 50m)
     if (autoVoiceEnabled) {
       if (!announcedStages.has(activeTbtIndex)) {
         announcedStages.set(activeTbtIndex, new Set());
@@ -803,7 +797,6 @@ function getNextPendingWaypoint() {
 function openInOrganicMaps(lat, lng, label = 'Destino MOTOATLAS') {
   if (!lat || !lng) return;
   const encodedName = encodeURIComponent(label);
-  // Esquema nativo om:// para Organic Maps no iOS com fallback para geo: / Apple Maps
   const omUrl = `om://map?v=1&ll=${lat.toFixed(6)},${lng.toFixed(6)}&n=${encodedName}`;
   window.location.href = omUrl;
 }
@@ -928,13 +921,11 @@ function exportActiveRouteAsGpx() {
 
   const esc = s => String(s || '').replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
 
-  const wptXml = wps.map(w => `  <wpt lat="${w.lat}" lon="${w.lng}"><name>${esc(w.name)}</name></wpt>`).join('
-');
-  const trkXml = coords.map(([lat, lng]) => `      <trkpt lat="${lat}" lon="${lng}"></trkpt>`).join('
-');
+  const wptXml = wps.map(w => `  <wpt lat="${w.lat}" lon="${w.lng}"><name>${esc(w.name)}</name></wpt>`).join('\n');
+  const trkXml = coords.map(([lat, lng]) => `      <trkpt lat="${lat}" lon="${lng}"></trkpt>`).join('\n');
 
   const gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="MOTOATLAS Road v1.4" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="MOTOATLAS Road v1.4.1" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata><name>${esc(activeTrip.tripTitle)}</name></metadata>
 ${wptXml}
   <trk>
@@ -993,7 +984,6 @@ function toggleGps() {
       }
       map.panTo(currentCoords);
 
-      // Verificar se saiu mais de 85 metros da rota para recalcular automaticamente
       const offDist = distanceToRouteMeters(latitude, longitude, activeTrip.routeCoords || []);
       if (offDist > 85) {
         triggerAutoRecalculate();
@@ -1267,8 +1257,7 @@ function bindEvents() {
       navigator.share({ title: activeTrip.tripTitle, text: msg }).catch(() => {});
     } else {
       navigator.clipboard?.writeText(msg);
-      alert(`Coordenadas copiadas:
-${msg}`);
+      alert(`Coordenadas copiadas:\n${msg}`);
     }
   });
 

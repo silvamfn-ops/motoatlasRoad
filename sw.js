@@ -1,4 +1,4 @@
-const CACHE_NAME = 'motoatlas-road-v1.4-cache';
+const CACHE_NAME = 'motoatlas-road-v1.4.1-cache';
 const APP_SHELL = [
   './',
   './index.html',
@@ -27,7 +27,6 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = event.request.url;
-  // Cache-first para blocos do OpenStreetMap e recursos estáticos da aplicação
   if (url.includes('tile.openstreetmap.org') || APP_SHELL.some(item => url.endsWith(item.replace('./', '')))) {
     event.respondWith(
       caches.match(event.request).then(cached => {
