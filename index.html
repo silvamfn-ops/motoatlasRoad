@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="MOTOATLAS Road" />
-  <title>MOTOATLAS Road v1.3 — Otimizado para iPhone 7 Plus (736×414)</title>
+  <title>MOTOATLAS Road v1.4 — Navegação Inteligente iPhone 7 Plus</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
@@ -16,7 +16,10 @@
   <!-- TOP HUD BAR COMPACTA PARA ECRÃ 5.5" LANDSCAPE (736x414 CSS PX) -->
   <header class="road-hud">
     <div class="hud-trip-info">
-      <span class="hud-code" id="hudTripCode">SEM VIAGEM</span>
+      <div class="hud-badges-row">
+        <span class="hud-code" id="hudTripCode">SEM VIAGEM</span>
+        <span class="hud-route-mode" id="hudRouteEngineBadge" title="Motor de roteamento ativo">🧭 OSRM</span>
+      </div>
       <h1 id="hudTripTitle">MOTOATLAS Road</h1>
       <span class="hud-sub" id="hudStageSubtitle">Importa viagem (.json / Supabase) ou .gpx</span>
     </div>
@@ -47,7 +50,7 @@
   <!-- VIEW 1: COCKPIT LANDSCAPE (ROADBOOK ESQUERDA + SELETOR MAPA/VOZ VS TURN-BY-TURN DIREITA) -->
   <main id="view-cockpit" class="road-view active">
     <div class="cockpit-grid">
-      <!-- ESQUERDA: ROADBOOK DE GUIADOR (SCROLL INERCIAL iOS + LUVAS) -->
+      <!-- ESQUERDA: ROADBOOK DE GUIADOR (SCROLL INERCIAL iOS + LUVAS + ORGANIC MAPS) -->
       <aside class="cockpit-roadbook">
         <div class="next-wp-banner" id="nextWpBanner">
           <div class="next-wp-top">
@@ -57,7 +60,10 @@
           <strong id="nextWpTitle">—</strong>
           <div class="next-wp-meta">
             <span id="nextWpDist">Km —</span>
-            <button type="button" id="btnShareCoords" class="btn-glove-sm">📍 GPS</button>
+            <div class="next-wp-btns">
+              <button type="button" id="btnOpenOrganicMaps" class="btn-glove-sm organic-btn" title="Abrir próxima paragem no Organic Maps (Offline)">🗺️ Organic</button>
+              <button type="button" id="btnShareCoords" class="btn-glove-sm" title="Partilhar ou abrir coordenadas">📍 GPS</button>
+            </div>
           </div>
         </div>
 
@@ -78,25 +84,31 @@
           </button>
         </div>
 
-        <!-- MODO A: MAPA DETALHADO OSM STANDARD (INDEPENDENTE DO TEMA) + VOZ AUTOMÁTICA -->
+        <!-- MODO A: MAPA DETALHADO OSM STANDARD + CACHE OFFLINE + VOZ AUTOMÁTICA -->
         <div id="panelMapVoice" class="nav-stage-panel active">
           <div id="road-map" class="osm-detailed-map"></div>
+          <div class="offroute-toast" id="offRouteToast" hidden>
+            ⚠️ Fora de rota! A recalcular caminho...
+          </div>
           <div class="map-floating-controls">
             <button type="button" id="btnToggleGps" class="btn-float">📡 GPS: OFF</button>
             <button type="button" id="btnCenterRoute" class="btn-float">🎯 Rota</button>
-            <button type="button" id="btnMapNightDim" class="btn-float" title="Filtro noturno no mapa sem perder detalhe">🌘 100%</button>
+            <button type="button" id="btnMapNightDim" class="btn-float" title="Filtro noturno no mapa">🌘 100%</button>
             <button type="button" id="btnToggleAutoVoice" class="btn-float primary">🔊 Voz: ON</button>
           </div>
         </div>
 
-        <!-- MODO B: PAINEL TURN-BY-TURN (ECRÃ ESCURO DE ALTO CONTRASTE) -->
+        <!-- MODO B: PAINEL TURN-BY-TURN (ECRÃ ESCURO DE ALTO CONTRASTE + NOME DA RUA + ROTUNDAS) -->
         <div id="panelTurnByTurn" class="nav-stage-panel tbt-dark-panel">
           <div class="tbt-top-row">
-            <div class="tbt-maneuver-box">
-              <div class="tbt-arrow" id="tbtArrow">↑</div>
+            <div class="tbt-maneuver-box" id="tbtManeuverBox">
+              <div class="tbt-arrow-col">
+                <div class="tbt-arrow" id="tbtArrow">↑</div>
+                <span class="tbt-roundabout-exit" id="tbtRoundaboutExit" hidden>2ª</span>
+              </div>
               <div class="tbt-dist-wrap">
                 <div class="tbt-step-meta">
-                  <span class="tbt-lbl">MANOBRA</span>
+                  <span class="tbt-lbl" id="tbtRoadRef">MANOBRA</span>
                   <span class="tbt-counter-pill" id="tbtStepCounter">1/1</span>
                 </div>
                 <strong class="tbt-distance" id="tbtDistance">0 m</strong>
@@ -108,6 +120,7 @@
               <span class="tbt-lbl">VELOCIDADE</span>
               <strong class="tbt-speed-val" id="tbtSpeedBig">0</strong>
               <span class="tbt-speed-unit">km/h</span>
+              <span class="tbt-wake-pill" id="wakeLockBadge" title="Ecrã mantido aceso">💡 Ativo</span>
             </div>
           </div>
 
@@ -122,11 +135,14 @@
             <button type="button" id="btnTbtRepeatVoice" class="btn-tbt-voice">
               🔊 Repetir Voz
             </button>
-            <button type="button" id="btnTbtPrevStep" class="btn-tbt-sim" title="Voltar à manobra anterior">
-              ⏮️ Ant.
+            <button type="button" id="btnTbtRecalcNow" class="btn-tbt-sim" title="Recalcular rota desde a posição GPS atual">
+              🔄 Recalc.
             </button>
-            <button type="button" id="btnTbtNextStep" class="btn-tbt-sim" title="Avançar para a próxima curva">
-              ⏭️ Próx.
+            <button type="button" id="btnTbtPrevStep" class="btn-tbt-sim" title="Manobra anterior">
+              ⏮️
+            </button>
+            <button type="button" id="btnTbtNextStep" class="btn-tbt-sim" title="Próxima manobra">
+              ⏭️
             </button>
           </div>
         </div>
@@ -194,29 +210,27 @@
     </div>
   </section>
 
-  <!-- VIEW 3: IMPORTAR VIAGEM / GPX & FECHAR PARA O STUDIO -->
+  <!-- VIEW 3: IMPORTAR VIAGEM / GPX, CACHE OFFLINE & FECHAR PARA O STUDIO -->
   <section id="view-sync" class="road-view">
     <div class="sync-grid">
-      <!-- BLOCO 1: IMPORTAR VIAGEM ATIVA OU GPX COM ANÁLISE DE CURVAS -->
+      <!-- BLOCO 1: ROTEAMENTO REAL, CACHE OFFLINE E GPX -->
       <div class="road-card">
-        <h2>📥 1. Carregar Rota ou Ficheiro GPX</h2>
-        <p class="muted">Importa do Studio ou carrega um <strong>.gpx</strong> para gerar automaticamente todas as curvas, setas e distâncias Turn-by-Turn.</p>
+        <h2>📥 1. Navegação Real, Cache & GPX</h2>
+        <p class="muted">Enriquece qualquer rota com <strong>nomes de ruas, saídas de rotundas, recálculo automático</strong> e guarda o mapa em cache antes de partir.</p>
 
-        <div class="sync-box">
-          <label class="file-drop-glove gpx-highlight">
-            🧭 Importar Ficheiro GPX (.gpx) — Gerar Curvas Turn-by-Turn
-            <input type="file" id="roadGpxFileInput" accept=".gpx,application/gpx+xml,text/xml" hidden />
-          </label>
+        <div class="sync-actions-row">
+          <button type="button" id="btnEnrichRouteOsrm" class="btn-glove-primary">
+            🛣️ Gerar Ruas & Rotundas (OSRM)
+          </button>
+          <button type="button" id="btnCacheMapTiles" class="btn-glove-outline">
+            💾 Descarregar Mapa Offline
+          </button>
         </div>
 
-        <div class="sync-box">
-          <label>
-            Sensibilidade de Deteção de Curvas GPX
-            <select id="gpxTurnSensitivity">
-              <option value="28">🏍️ Estradas Nacionais & Curvas (≥ 28°)</option>
-              <option value="42" selected>⚖️ Equilibrado — Curvas & Cruzamentos (≥ 42°)</option>
-              <option value="65">🛣️ Apenas Viragens Acentuadas & Ganchos (≥ 65°)</option>
-            </select>
+        <div class="sync-box" style="margin-top:0.45rem;">
+          <label class="file-drop-glove gpx-highlight">
+            🧭 Importar Ficheiro GPX (.gpx) — Ruas & Turn-by-Turn
+            <input type="file" id="roadGpxFileInput" accept=".gpx,application/gpx+xml,text/xml" hidden />
           </label>
         </div>
 
@@ -238,13 +252,23 @@
         </div>
       </div>
 
-      <!-- BLOCO 2: DEVOLVER DADOS NO FIM DA VIAGEM -->
+      <!-- BLOCO 2: EXPORTAR GPX / ORGANIC MAPS & DEVOLVER DADOS AO STUDIO -->
       <div class="road-card highlight">
-        <h2>📤 2. Fechar Viagem & Enviar para PC</h2>
-        <p class="muted">No final da expedição, envia as despesas, litros abastecidos e odómetro atualizado de volta para o <strong>MOTOATLAS Studio</strong>.</p>
+        <h2>📤 2. Salvaguarda Offline & Retorno Studio</h2>
+        <p class="muted">Exporta a rota para <strong>Organic Maps / OsmAnd</strong> ou envia os registos de volta para o <strong>MOTOATLAS Studio</strong>.</p>
 
-        <button type="button" id="btnPushCompletedTrip" class="btn-glove-success">🚀 Enviar Registos para o Studio (Supabase)</button>
-        <button type="button" id="btnDownloadReturnJson" class="btn-glove-outline" style="margin-top:0.5rem;">⬇️ Descarregar Ficheiro de Retorno (.json)</button>
+        <div class="sync-actions-row">
+          <button type="button" id="btnExportRouteGpx" class="btn-glove-outline">
+            🗺️ Exportar .GPX (Organic Maps)
+          </button>
+          <button type="button" id="btnDownloadReturnJson" class="btn-glove-outline">
+            ⬇️ Retorno Studio (.json)
+          </button>
+        </div>
+
+        <button type="button" id="btnPushCompletedTrip" class="btn-glove-success" style="margin-top:0.45rem;">
+          🚀 Enviar Registos para o Studio (Supabase)
+        </button>
 
         <div id="roadSyncFeedback" class="sync-feedback"></div>
 

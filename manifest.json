@@ -1,7 +1,7 @@
 {
   "name": "MOTOATLAS Road",
   "short_name": "MOTOATLAS Road",
-  "description": "Cockpit de Guiador para iPhone 7 Plus: Mapa OSM + Voz + Turn-by-Turn GPX",
+  "description": "Cockpit de Guiador para iPhone 7 Plus com Nomes de Ruas, Rotundas, Voz Antecipada e Cache Offline",
   "start_url": "./index.html",
   "display": "standalone",
   "orientation": "landscape",

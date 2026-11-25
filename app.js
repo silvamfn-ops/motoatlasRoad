@@ -1,13 +1,15 @@
-// MOTOATLAS Road v1.3 — Otimizado para iPhone 7 Plus (736x414 Landscape) + Motor Turn-by-Turn GPX
+// MOTOATLAS Road v1.4 — Roteamento Real OSRM (Ruas, Rotundas, Recálculo), Cache Offline, Voz Tripla (1000m/300m/50m) & Organic Maps
 const ROAD_ACTIVE_TRIP_KEY = 'motoatlas_road_v1_active_trip';
 const ROAD_DONE_WPS_KEY = 'motoatlas_road_v1_done_wps';
 const SB_URL_KEY = 'motoatlas_supabase_url';
 const SB_ANON_KEY = 'motoatlas_supabase_anon_key';
+const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
 
 const DEFAULT_DEMO_TRIP = {
   id: 'trip-andaluzia-26',
   tripCode: 'ANDALUZIA-26',
   profile: 'moto',
+  routingEngine: 'geometry',
   tripTitle: 'Expedição Andaluzia & Sul Ibérico',
   stageSubtitle: 'Etapa 1: Lisboa → Córdoba (via Évora & Zafra)',
   stageDistanceKm: 485,
@@ -15,56 +17,11 @@ const DEFAULT_DEMO_TRIP = {
   tankCapacityL: 14.1,
   avgConsumptionL100: 3.8,
   waypoints: [
-    {
-      name: 'Partida: Lisboa (Ponte Vasco da Gama)',
-      type: 'start',
-      lat: 38.7586,
-      lng: -9.0375,
-      km: 0,
-      arrow: '↑',
-      maneuver: 'Segue em frente pela A12 / N4 direção Évora',
-      afterPreview: 'Depois: saída N114 a 400 m → direção Évora Centro'
-    },
-    {
-      name: 'Café & Reagrupamento: Évora',
-      type: 'viewpoint',
-      lat: 38.5714,
-      lng: -7.9135,
-      km: 132,
-      arrow: '↱',
-      maneuver: 'Vira à direita na N18 direção Estremoz / Badajoz',
-      afterPreview: 'Depois: rotunda a 350 m → 2.ª saída direção Mérida'
-    },
-    {
-      name: 'Abastecimento: Repsol Mérida',
-      type: 'fuel',
-      lat: 38.9161,
-      lng: -6.3437,
-      km: 285,
-      arrow: '↻',
-      maneuver: 'Na rotunda da Repsol, sai na 2.ª saída para a N-630',
-      afterPreview: 'Depois: curva fechada à esquerda a 500 m → direção Zafra'
-    },
-    {
-      name: 'Paragem Cultural: Zafra (Plaza Grande)',
-      type: 'monument',
-      lat: 38.4261,
-      lng: -6.4184,
-      km: 348,
-      arrow: '↰',
-      maneuver: 'Vira à esquerda para a N-432 direção Córdoba',
-      afterPreview: 'Depois: travessia de serra a 800 m → reduz para 2.ª/3.ª caixa'
-    },
-    {
-      name: 'Chegada / Dormida: Córdoba',
-      type: 'sleep',
-      lat: 37.8882,
-      lng: -4.7794,
-      km: 485,
-      arrow: '🏁',
-      maneuver: 'Chegada ao destino: Córdoba (Hotel / Centro Histórico)',
-      afterPreview: 'Fim da etapa de hoje — estacionamento e descanso'
-    }
+    { name: 'Partida: Lisboa (Ponte Vasco da Gama)', type: 'start', lat: 38.7586, lng: -9.0375, km: 0 },
+    { name: 'Café & Reagrupamento: Évora', type: 'viewpoint', lat: 38.5714, lng: -7.9135, km: 132 },
+    { name: 'Abastecimento: Repsol Mérida', type: 'fuel', lat: 38.9161, lng: -6.3437, km: 285 },
+    { name: 'Paragem Cultural: Zafra (Plaza Grande)', type: 'monument', lat: 38.4261, lng: -6.4184, km: 348 },
+    { name: 'Chegada / Dormida: Córdoba', type: 'sleep', lat: 37.8882, lng: -4.7794, km: 485 }
   ],
   routeCoords: [
     [38.7586, -9.0375],
@@ -100,11 +57,15 @@ let gpsWatchId = null;
 let currentCoords = null;
 let currentSpeedKmh = 0;
 
-// Estado de Navegação Turn-by-Turn & Voz
+// Estado de Navegação Turn-by-Turn, Voz Tripla & Recálculo
 let activeTbtIndex = 0;
 let autoVoiceEnabled = true;
-let announcedTbtIndices = new Set();
-let mapDimLevel = 0; // 0 = 100%, 1 = 75%, 2 = 55%
+// Mapa de estágios de voz já anunciados por índice de manobra: { [stepIdx]: Set(['1000', '300', '50']) }
+let announcedStages = new Map();
+let mapDimLevel = 0;
+let isRecalculating = false;
+let lastRecalcTimestamp = 0;
+let wakeLockSentinel = null;
 
 function loadRoadTrip() {
   try {
@@ -120,20 +81,57 @@ function saveRoadTrip() {
   localStorage.setItem(ROAD_DONE_WPS_KEY, JSON.stringify(doneWps));
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  registerOfflineServiceWorker();
   initTopNavigation();
   initNavModeSwitcher();
   initMap();
-  ensureTurnStepsReady();
+  await ensureTurnStepsReady();
   loadSbInputs();
   renderAllRoadUI();
   bindEvents();
 
-  // Recalcular mapa ao rodar o iPhone (Portrait <-> Landscape)
   window.addEventListener('orientationchange', () => {
     setTimeout(() => { if (map) map.invalidateSize(); }, 250);
   });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && gpsWatchId !== null) {
+      requestScreenWakeLock();
+    }
+  });
 });
+
+// --- SERVICE WORKER PARA CACHE OFFLINE DE BLOCOS OSM E FICHEIROS DA APP ---
+function registerOfflineServiceWorker() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(err => {
+      console.warn('Service Worker não registado (normal em file://):', err);
+    });
+  }
+}
+
+// --- SCREEN WAKE LOCK API (IMPEDE BLOQUEIO DO ECRÃ DO IPHONE EM NAVEGAÇÃO) ---
+async function requestScreenWakeLock() {
+  const badge = document.getElementById('wakeLockBadge');
+  if (!('wakeLock' in navigator)) {
+    if (badge) badge.textContent = '📱 iOS KeepOn';
+    return;
+  }
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request('screen');
+    if (badge) badge.textContent = '💡 Ecrã Fixo';
+  } catch {
+    if (badge) badge.textContent = '💡 Ativo';
+  }
+}
+
+function releaseScreenWakeLock() {
+  if (wakeLockSentinel) {
+    wakeLockSentinel.release().catch(() => {});
+    wakeLockSentinel = null;
+  }
+}
 
 function initTopNavigation() {
   document.querySelectorAll('.nav-pill').forEach(btn => {
@@ -149,7 +147,6 @@ function initTopNavigation() {
   });
 }
 
-// --- SELETOR DE DOIS MODOS NO PAINEL DIREITO (MAPA + VOZ VS TURN-BY-TURN) ---
 function initNavModeSwitcher() {
   const btnMap = document.getElementById('btnModeMapVoice');
   const btnTbt = document.getElementById('btnModeTurnByTurn');
@@ -173,11 +170,11 @@ function initNavModeSwitcher() {
   });
 }
 
-// --- MAPA OSM STANDARD SEMPRE DETALHADO E INDEPENDENTE DO TEMA ---
 function initMap() {
   map = L.map('road-map', { zoomControl: false }).setView([38.5, -8.0], 7);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
+    crossOrigin: true,
     attribution: '&copy; OSM'
   }).addTo(map);
   routeLayer = L.layerGroup().addTo(map);
@@ -185,14 +182,14 @@ function initMap() {
   markersLayer = L.layerGroup().addTo(map);
 }
 
-// --- WEB SPEECH API (SÍNTESE DE VOZ PARA INTERCOMUNICADOR / iOS SAFARI) ---
+// --- SÍNTESE DE VOZ PT-PT OTIMIZADA PARA INTERCOMUNICADOR ---
 function speakInstruction(text) {
   if (!('speechSynthesis' in window) || !text) return;
   try {
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'pt-PT';
-    utter.rate = 1.02;
+    utter.rate = 1.03;
     utter.pitch = 1.0;
     window.speechSynthesis.speak(utter);
   } catch (err) {
@@ -200,7 +197,7 @@ function speakInstruction(text) {
   }
 }
 
-// --- GEOMETRIA ESFÉRICA: DISTÂNCIA (HAVERSINE) E AZIMUTE (BEARING) ---
+// --- GEOMETRIA ESFÉRICA & DISTÂNCIA AO TRAÇADO (DETEÇÃO DE DESVIO) ---
 function calcDistanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = deg => (deg * Math.PI) / 180;
@@ -228,28 +225,16 @@ function normalizeTurnAngle(bearing1, bearing2) {
   return ((bearing2 - bearing1 + 540) % 360) - 180;
 }
 
-function classifyTurnAngle(deltaDeg) {
-  const abs = Math.abs(deltaDeg);
-  const isRight = deltaDeg > 0;
-  if (abs >= 135) {
-    return {
-      arrow: '↻',
-      label: isRight ? 'Gancho fechado à direita' : 'Gancho fechado à esquerda',
-      shortLabel: isRight ? 'gancho à direita' : 'gancho à esquerda'
-    };
+function distanceToRouteMeters(lat, lng, coords) {
+  if (!coords || coords.length === 0) return 0;
+  let minD = Infinity;
+  // Amostragem rápida em rotas muito longas
+  const step = coords.length > 1500 ? 3 : 1;
+  for (let i = 0; i < coords.length; i += step) {
+    const d = calcDistanceMeters(lat, lng, coords[i][0], coords[i][1]);
+    if (d < minD) minD = d;
   }
-  if (abs >= 65) {
-    return {
-      arrow: isRight ? '↱' : '↰',
-      label: isRight ? 'Vira à direita' : 'Vira à esquerda',
-      shortLabel: isRight ? 'viragem à direita' : 'viragem à esquerda'
-    };
-  }
-  return {
-    arrow: isRight ? '↗' : '↖',
-    label: isRight ? 'Curva ligeira à direita' : 'Curva ligeira à esquerda',
-    shortLabel: isRight ? 'curva ligeira à direita' : 'curva ligeira à esquerda'
-  };
+  return minD;
 }
 
 function formatDistanceLabel(meters) {
@@ -259,10 +244,260 @@ function formatDistanceLabel(meters) {
   return `${Math.max(0, Math.round(meters / 10) * 10)} m`;
 }
 
-// --- MOTOR AUTOMÁTICO DE EXTRAÇÃO DE CURVAS A PARTIR DE TRAÇADO GPX ---
-function generateTurnStepsFromCoords(coords, waypoints = [], minAngleDeg = 42) {
-  if (!coords || coords.length < 2) return [];
+// --- TRADUTOR DE MANOBRAS OSRM PARA PORTUGUÊS DE CONDUÇÃO ---
+function translateOsrmManeuver(step, isLastLegStep, waypointName) {
+  const m = step.maneuver || {};
+  const type = m.type || 'continue';
+  const mod = m.modifier || '';
+  const roadName = [step.ref, step.name].filter(Boolean).join(' • ');
+  const roadPhrase = roadName ? ` para ${roadName}` : '';
+  const exitNum = m.exit || '';
 
+  if (type === 'depart') {
+    return {
+      arrow: '↑',
+      roundaboutExit: '',
+      roadRef: step.ref || 'PARTIDA',
+      instruction: waypointName ? `Partida: ${waypointName}${roadPhrase}` : `Arranca${roadPhrase}`,
+      shortDesc: roadName || 'início da rota'
+    };
+  }
+
+  if (type === 'arrive') {
+    return {
+      arrow: '🏁',
+      roundaboutExit: '',
+      roadRef: 'CHEGADA',
+      instruction: waypointName ? `Chegada: ${waypointName}` : 'Chegada ao destino',
+      shortDesc: waypointName || 'chegada'
+    };
+  }
+
+  if (type === 'roundabout' || type === 'rotary') {
+    const exitOrdinal = exitNum ? `${exitNum}.ª saída` : 'saída indicada';
+    return {
+      arrow: '↻',
+      roundaboutExit: exitNum ? `${exitNum}ª` : '↻',
+      roadRef: step.ref || 'ROTUNDA',
+      instruction: `Na rotunda, sai na ${exitOrdinal}${roadPhrase}`,
+      shortDesc: `rotunda (${exitOrdinal})${roadPhrase}`
+    };
+  }
+
+  if (type === 'exit roundabout' || type === 'exit rotary') {
+    return {
+      arrow: '↗',
+      roundaboutExit: '',
+      roadRef: step.ref || 'SAÍDA',
+      instruction: `Sai da rotunda${roadPhrase}`,
+      shortDesc: `saída da rotunda${roadPhrase}`
+    };
+  }
+
+  if (type === 'off ramp' || type === 'on ramp') {
+    const dir = mod.includes('left') ? 'à esquerda' : 'à direita';
+    return {
+      arrow: mod.includes('left') ? '↖' : '↗',
+      roundaboutExit: '',
+      roadRef: step.ref || 'SAÍDA',
+      instruction: `Toma o acesso ${dir}${roadPhrase}`,
+      shortDesc: `acesso ${dir}${roadPhrase}`
+    };
+  }
+
+  if (type === 'fork') {
+    const isLeft = mod.includes('left');
+    return {
+      arrow: isLeft ? '↖' : '↗',
+      roundaboutExit: '',
+      roadRef: step.ref || 'BIFURCAÇÃO',
+      instruction: `Na bifurcação, mantém-te ${isLeft ? 'à esquerda' : 'à direita'}${roadPhrase}`,
+      shortDesc: `bifurcação ${isLeft ? 'à esquerda' : 'à direita'}`
+    };
+  }
+
+  if (mod === 'uturn') {
+    return {
+      arrow: '↺',
+      roundaboutExit: '',
+      roadRef: step.ref || 'INVERSÃO',
+      instruction: `Inverte o sentido de marcha${roadPhrase}`,
+      shortDesc: 'inversão de marcha'
+    };
+  }
+
+  if (mod === 'sharp right') {
+    return {
+      arrow: '↻',
+      roundaboutExit: '',
+      roadRef: step.ref || 'CURVA',
+      instruction: `Curva fechada à direita${roadPhrase}`,
+      shortDesc: `direita fechada${roadPhrase}`
+    };
+  }
+
+  if (mod === 'right') {
+    return {
+      arrow: '↱',
+      roundaboutExit: '',
+      roadRef: step.ref || 'VIRAGEM',
+      instruction: `Vira à direita${roadPhrase}`,
+      shortDesc: `direita${roadPhrase}`
+    };
+  }
+
+  if (mod === 'slight right') {
+    return {
+      arrow: '↗',
+      roundaboutExit: '',
+      roadRef: step.ref || 'DESVIO',
+      instruction: `Curva ligeira à direita${roadPhrase}`,
+      shortDesc: `ligeira direita${roadPhrase}`
+    };
+  }
+
+  if (mod === 'sharp left') {
+    return {
+      arrow: '↺',
+      roundaboutExit: '',
+      roadRef: step.ref || 'CURVA',
+      instruction: `Curva fechada à esquerda${roadPhrase}`,
+      shortDesc: `esquerda fechada${roadPhrase}`
+    };
+  }
+
+  if (mod === 'left') {
+    return {
+      arrow: '↰',
+      roundaboutExit: '',
+      roadRef: step.ref || 'VIRAGEM',
+      instruction: `Vira à esquerda${roadPhrase}`,
+      shortDesc: `esquerda${roadPhrase}`
+    };
+  }
+
+  if (mod === 'slight left') {
+    return {
+      arrow: '↖',
+      roundaboutExit: '',
+      roadRef: step.ref || 'DESVIO',
+      instruction: `Curva ligeira à esquerda${roadPhrase}`,
+      shortDesc: `ligeira esquerda${roadPhrase}`
+    };
+  }
+
+  return {
+    arrow: '↑',
+    roundaboutExit: '',
+    roadRef: step.ref || 'EM FRENTE',
+    instruction: `Segue em frente${roadPhrase}`,
+    shortDesc: `em frente${roadPhrase}`
+  };
+}
+
+// --- MOTOR DE ROTEAMENTO REAL OSRM (NOMES DE RUAS, ROTUNDAS E TRAÇADO EXATO) ---
+async function buildOsrmRouteFromPoints(pointsLatLng, waypointsMeta = []) {
+  if (!pointsLatLng || pointsLatLng.length < 2) {
+    throw new Error('São necessários pelo menos 2 pontos para calcular a rota.');
+  }
+
+  // OSRM aceita até ~25 waypoints confortavelmente na URL pública
+  let sampledPoints = pointsLatLng;
+  if (pointsLatLng.length > 22) {
+    const step = (pointsLatLng.length - 1) / 21;
+    sampledPoints = [];
+    for (let i = 0; i < 22; i++) {
+      sampledPoints.push(pointsLatLng[Math.round(i * step)]);
+    }
+  }
+
+  const coordStr = sampledPoints.map(p => `${p[1].toFixed(5)},${p[0].toFixed(5)}`).join(';');
+  const url = `${OSRM_BASE_URL}/${coordStr}?overview=full&geometries=geojson&steps=true`;
+
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Servidor de roteamento indisponível (HTTP ${resp.status})`);
+  }
+  const data = await resp.json();
+  if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+    throw new Error('Não foi possível calcular trajeto rodoviário entre os pontos.');
+  }
+
+  const route = data.routes[0];
+  const fullCoords = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+  const totalDistKm = Math.round(route.distance / 1000);
+
+  const tbtSteps = [];
+  let cumDistM = 0;
+
+  route.legs.forEach((leg, legIdx) => {
+    const originWp = waypointsMeta[legIdx];
+    const destWp = waypointsMeta[legIdx + 1];
+
+    leg.steps.forEach((step, stepIdx) => {
+      const isLastInLeg = stepIdx === leg.steps.length - 1;
+      const isFinalArrival = isLastInLeg && legIdx === route.legs.length - 1;
+
+      // Ignorar passos intermédios de chegada entre waypoints que não sejam o destino final
+      if (isLastInLeg && !isFinalArrival) {
+        if (destWp) {
+          tbtSteps.push({
+            lat: step.maneuver.location[1],
+            lng: step.maneuver.location[0],
+            cumDistM,
+            legDistM: Math.round(step.distance),
+            arrow: PIN_ICONS[destWp.type] || '📍',
+            roundaboutExit: '',
+            roadRef: `KM ${Math.round(cumDistM / 1000)}`,
+            instruction: `Paragem: ${destWp.name}`,
+            shortDesc: destWp.name,
+            isWaypoint: true
+          });
+        }
+        cumDistM += step.distance;
+        return;
+      }
+
+      const wpLabel = stepIdx === 0 ? originWp?.name : (isFinalArrival ? destWp?.name : '');
+      const translated = translateOsrmManeuver(step, isLastInLeg, wpLabel);
+
+      tbtSteps.push({
+        lat: step.maneuver.location[1],
+        lng: step.maneuver.location[0],
+        cumDistM,
+        legDistM: Math.round(step.distance),
+        arrow: translated.arrow,
+        roundaboutExit: translated.roundaboutExit,
+        roadRef: translated.roadRef,
+        instruction: translated.instruction,
+        shortDesc: translated.shortDesc,
+        isWaypoint: Boolean(wpLabel)
+      });
+
+      cumDistM += step.distance;
+    });
+  });
+
+  for (let i = 0; i < tbtSteps.length; i++) {
+    if (i + 1 < tbtSteps.length) {
+      const nextStep = tbtSteps[i + 1];
+      const gapM = Math.max(0, Math.round(nextStep.cumDistM - tbtSteps[i].cumDistM));
+      tbtSteps[i].afterPreview = `Depois: ${nextStep.shortDesc} a ${formatDistanceLabel(gapM)}`;
+    } else {
+      tbtSteps[i].afterPreview = 'Fim da etapa — estacionamento e descanso';
+    }
+  }
+
+  return {
+    routeCoords: fullCoords,
+    totalDistKm,
+    tbtSteps
+  };
+}
+
+// --- FALLBACK GEOMÉTRICO OFFLINE CASO NÃO EXISTA INTERNET ---
+function generateGeometricFallbackSteps(coords, waypoints = [], minAngleDeg = 38) {
+  if (!coords || coords.length < 2) return [];
   const simplified = [coords[0]];
   for (let i = 1; i < coords.length - 1; i++) {
     const prev = simplified[simplified.length - 1];
@@ -274,229 +509,163 @@ function generateTurnStepsFromCoords(coords, waypoints = [], minAngleDeg = 42) {
 
   const cumDistMeters = [0];
   for (let i = 1; i < simplified.length; i++) {
-    const d = calcDistanceMeters(
-      simplified[i - 1][0], simplified[i - 1][1],
-      simplified[i][0], simplified[i][1]
+    cumDistMeters.push(
+      cumDistMeters[i - 1] + calcDistanceMeters(simplified[i - 1][0], simplified[i - 1][1], simplified[i][0], simplified[i][1])
     );
-    cumDistMeters.push(cumDistMeters[i - 1] + d);
   }
 
-  const rawSteps = [];
-
-  rawSteps.push({
+  const steps = [{
     lat: simplified[0][0],
     lng: simplified[0][1],
     cumDistM: 0,
+    legDistM: 0,
     arrow: '↑',
-    instruction: waypoints[0]?.name ? `Partida: ${waypoints[0].name}` : 'Início da rota GPX — segue em frente',
-    shortDesc: 'início da rota',
-    isWaypoint: Boolean(waypoints[0])
-  });
+    roundaboutExit: '',
+    roadRef: 'OFFLINE',
+    instruction: waypoints[0]?.name ? `Partida: ${waypoints[0].name}` : 'Partida (Modo Offline)',
+    shortDesc: 'partida',
+    isWaypoint: true
+  }];
 
-  let lastTurnCumDistM = 0;
+  let lastTurnCum = 0;
   for (let i = 1; i < simplified.length - 1; i++) {
-    const backIdx = Math.max(0, i - 2);
-    const fwdIdx = Math.min(simplified.length - 1, i + 2);
-
-    const bIn = calcBearingDeg(
-      simplified[backIdx][0], simplified[backIdx][1],
-      simplified[i][0], simplified[i][1]
-    );
-    const bOut = calcBearingDeg(
-      simplified[i][0], simplified[i][1],
-      simplified[fwdIdx][0], simplified[fwdIdx][1]
-    );
-
-    const delta = normalizeTurnAngle(bIn, bOut);
-    const absDelta = Math.abs(delta);
-    const distSinceLastTurn = cumDistMeters[i] - lastTurnCumDistM;
-
-    if (absDelta >= minAngleDeg && distSinceLastTurn >= 90) {
-      const turnInfo = classifyTurnAngle(delta);
-      const kmMark = (cumDistMeters[i] / 1000).toFixed(1);
-      rawSteps.push({
+    const b1 = calcBearingDeg(simplified[Math.max(0, i - 2)][0], simplified[Math.max(0, i - 2)][1], simplified[i][0], simplified[i][1]);
+    const b2 = calcBearingDeg(simplified[i][0], simplified[i][1], simplified[Math.min(simplified.length - 1, i + 2)][0], simplified[Math.min(simplified.length - 1, i + 2)][1]);
+    const delta = normalizeTurnAngle(b1, b2);
+    if (Math.abs(delta) >= minAngleDeg && (cumDistMeters[i] - lastTurnCum) >= 90) {
+      const right = delta > 0;
+      steps.push({
         lat: simplified[i][0],
         lng: simplified[i][1],
         cumDistM: cumDistMeters[i],
-        arrow: turnInfo.arrow,
-        instruction: `${turnInfo.label} (${Math.round(absDelta)}°) • Km ${kmMark}`,
-        shortDesc: turnInfo.shortLabel,
+        legDistM: Math.round(cumDistMeters[i] - lastTurnCum),
+        arrow: right ? '↱' : '↰',
+        roundaboutExit: '',
+        roadRef: `KM ${(cumDistMeters[i] / 1000).toFixed(1)}`,
+        instruction: right ? 'Vira à direita no traçado' : 'Vira à esquerda no traçado',
+        shortDesc: right ? 'direita' : 'esquerda',
         isWaypoint: false
       });
-      lastTurnCumDistM = cumDistMeters[i];
+      lastTurnCum = cumDistMeters[i];
     }
   }
 
-  if (waypoints.length > 2) {
-    for (let w = 1; w < waypoints.length - 1; w++) {
-      const wp = waypoints[w];
-      let bestDistM = Infinity;
-      let bestCumM = (wp.km || 0) * 1000;
-      for (let i = 0; i < simplified.length; i++) {
-        const d = calcDistanceMeters(wp.lat, wp.lng, simplified[i][0], simplified[i][1]);
-        if (d < bestDistM) {
-          bestDistM = d;
-          bestCumM = cumDistMeters[i];
-        }
-      }
-      rawSteps.push({
-        lat: wp.lat,
-        lng: wp.lng,
-        cumDistM: bestCumM,
-        arrow: wp.arrow || '📍',
-        instruction: `Paragem: ${wp.name} (Km ${(bestCumM / 1000).toFixed(1)})`,
-        shortDesc: wp.name,
-        isWaypoint: true
-      });
-    }
-  }
-
-  rawSteps.sort((a, b) => a.cumDistM - b.cumDistM);
-
-  const totalDistM = cumDistMeters[cumDistMeters.length - 1];
-  const lastWp = waypoints[waypoints.length - 1];
-  rawSteps.push({
+  const totalM = cumDistMeters[cumDistMeters.length - 1];
+  steps.push({
     lat: simplified[simplified.length - 1][0],
     lng: simplified[simplified.length - 1][1],
-    cumDistM: totalDistM,
+    cumDistM: totalM,
+    legDistM: Math.round(totalM - lastTurnCum),
     arrow: '🏁',
-    instruction: lastWp?.name ? `Chegada: ${lastWp.name}` : `Chegada ao destino GPX (Km ${(totalDistM / 1000).toFixed(1)})`,
-    shortDesc: 'chegada ao destino',
+    roundaboutExit: '',
+    roadRef: 'CHEGADA',
+    instruction: waypoints[waypoints.length - 1]?.name ? `Chegada: ${waypoints[waypoints.length - 1].name}` : 'Chegada ao destino',
+    shortDesc: 'chegada',
     isWaypoint: true
   });
 
-  for (let i = 0; i < rawSteps.length; i++) {
-    const prevCum = i > 0 ? rawSteps[i - 1].cumDistM : 0;
-    rawSteps[i].legDistM = Math.max(0, Math.round(rawSteps[i].cumDistM - prevCum));
-
-    if (i + 1 < rawSteps.length) {
-      const nextStep = rawSteps[i + 1];
-      const gapM = Math.max(0, Math.round(nextStep.cumDistM - rawSteps[i].cumDistM));
-      rawSteps[i].afterPreview = `Depois: ${nextStep.shortDesc} a ${formatDistanceLabel(gapM)}`;
-    } else {
-      rawSteps[i].afterPreview = 'Fim do percurso — estacionamento e descanso';
-    }
+  for (let i = 0; i < steps.length; i++) {
+    steps[i].afterPreview = i + 1 < steps.length
+      ? `Depois: ${steps[i + 1].shortDesc} a ${formatDistanceLabel(steps[i + 1].cumDistM - steps[i].cumDistM)}`
+      : 'Fim do percurso';
   }
-
-  return rawSteps;
+  return steps;
 }
 
-function parseGpxXml(xmlText, minAngleDeg = 42, fileName = 'Rota GPX') {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(xmlText, 'application/xml');
-  if (doc.querySelector('parsererror')) {
-    throw new Error('Ficheiro GPX inválido ou corrompido.');
+async function enrichActiveTripWithOsrm() {
+  const waypoints = activeTrip.waypoints || [];
+  const points = waypoints.length >= 2
+    ? waypoints.map(w => [w.lat, w.lng])
+    : (activeTrip.routeCoords || []);
+
+  if (points.length < 2) return false;
+
+  try {
+    const osrmResult = await buildOsrmRouteFromPoints(points, waypoints);
+    activeTrip.routeCoords = osrmResult.routeCoords;
+    activeTrip.stageDistanceKm = osrmResult.totalDistKm;
+    activeTrip.tbtSteps = osrmResult.tbtSteps;
+    activeTrip.routingEngine = 'osrm';
+    activeTrip.stageSubtitle = `OSRM • ${osrmResult.totalDistKm} km • ${osrmResult.tbtSteps.length} instruções`;
+    return true;
+  } catch (err) {
+    console.warn('OSRM falhou, a usar fallback geométrico:', err);
+    activeTrip.tbtSteps = generateGeometricFallbackSteps(activeTrip.routeCoords || points, waypoints);
+    activeTrip.routingEngine = 'geometry';
+    return false;
   }
-
-  const trkName = doc.querySelector('trk > name')?.textContent?.trim()
-    || doc.querySelector('rte > name')?.textContent?.trim()
-    || doc.querySelector('metadata > name')?.textContent?.trim()
-    || fileName.replace(/\.gpx$/i, '');
-
-  let ptNodes = Array.from(doc.querySelectorAll('trkpt'));
-  if (ptNodes.length < 2) {
-    ptNodes = Array.from(doc.querySelectorAll('rtept'));
-  }
-
-  const routeCoords = ptNodes
-    .map(pt => [parseFloat(pt.getAttribute('lat')), parseFloat(pt.getAttribute('lon'))])
-    .filter(([lat, lng]) => !Number.isNaN(lat) && !Number.isNaN(lng));
-
-  if (routeCoords.length < 2) {
-    throw new Error('O ficheiro GPX não contém pontos de traçado (<trkpt> ou <rtept>) suficientes.');
-  }
-
-  const wptNodes = Array.from(doc.querySelectorAll('wpt'));
-  const parsedWaypoints = wptNodes.map((wpt, idx) => {
-    const lat = parseFloat(wpt.getAttribute('lat'));
-    const lng = parseFloat(wpt.getAttribute('lon'));
-    const name = wpt.querySelector('name')?.textContent?.trim() || `Ponto ${idx + 1}`;
-    const lower = name.toLowerCase();
-    let type = 'viewpoint';
-    if (lower.includes('combust') || lower.includes('gasol') || lower.includes('repsol') || lower.includes('galp')) type = 'fuel';
-    else if (lower.includes('hotel') || lower.includes('dormida') || lower.includes('chegada')) type = 'sleep';
-    else if (idx === 0) type = 'start';
-    return { name, type, lat, lng, km: 0 };
-  }).filter(w => !Number.isNaN(w.lat) && !Number.isNaN(w.lng));
-
-  let totalDistM = 0;
-  for (let i = 1; i < routeCoords.length; i++) {
-    totalDistM += calcDistanceMeters(
-      routeCoords[i - 1][0], routeCoords[i - 1][1],
-      routeCoords[i][0], routeCoords[i][1]
-    );
-  }
-  const totalKm = Math.round(totalDistM / 1000);
-
-  const waypoints = parsedWaypoints.length >= 2
-    ? parsedWaypoints
-    : [
-        { name: `Partida: ${trkName}`, type: 'start', lat: routeCoords[0][0], lng: routeCoords[0][1], km: 0 },
-        { name: `Chegada: ${trkName}`, type: 'sleep', lat: routeCoords[routeCoords.length - 1][0], lng: routeCoords[routeCoords.length - 1][1], km: totalKm }
-      ];
-
-  waypoints.forEach((wp, idx) => {
-    if (idx === 0) wp.km = 0;
-    else if (idx === waypoints.length - 1) wp.km = totalKm;
-    else {
-      let acc = 0;
-      let bestAcc = 0;
-      let bestD = Infinity;
-      for (let i = 1; i < routeCoords.length; i++) {
-        acc += calcDistanceMeters(routeCoords[i - 1][0], routeCoords[i - 1][1], routeCoords[i][0], routeCoords[i][1]);
-        const d = calcDistanceMeters(wp.lat, wp.lng, routeCoords[i][0], routeCoords[i][1]);
-        if (d < bestD) {
-          bestD = d;
-          bestAcc = acc;
-        }
-      }
-      wp.km = Math.round(bestAcc / 1000);
-    }
-  });
-
-  const tbtSteps = generateTurnStepsFromCoords(routeCoords, waypoints, minAngleDeg);
-
-  return {
-    id: `gpx-${Date.now()}`,
-    tripCode: `GPX-${Math.floor(100 + Math.random() * 900)}`,
-    profile: 'moto',
-    tripTitle: trkName,
-    stageSubtitle: `GPX • ${totalKm} km • ${tbtSteps.length} manobras`,
-    stageDistanceKm: totalKm,
-    odometerKm: activeTrip.odometerKm || 0,
-    tankCapacityL: activeTrip.tankCapacityL || 14.1,
-    avgConsumptionL100: activeTrip.avgConsumptionL100 || 3.8,
-    waypoints,
-    routeCoords,
-    tbtSteps,
-    expenses: []
-  };
 }
 
-function ensureTurnStepsReady() {
+async function ensureTurnStepsReady() {
   if (!activeTrip.tbtSteps || activeTrip.tbtSteps.length === 0) {
-    const sens = parseInt(document.getElementById('gpxTurnSensitivity')?.value || '42', 10);
-    if (activeTrip.routeCoords && activeTrip.routeCoords.length >= 2) {
-      activeTrip.tbtSteps = generateTurnStepsFromCoords(
-        activeTrip.routeCoords,
-        activeTrip.waypoints || [],
-        sens
-      );
-    }
+    await enrichActiveTripWithOsrm();
+    saveRoadTrip();
   }
   activeTbtIndex = (activeTrip.tbtSteps && activeTrip.tbtSteps.length > 1) ? 1 : 0;
 }
 
+// --- RECÁLCULO AUTOMÁTICO QUANDO O CONDUTOR SAI DA ROTA (> 85 METROS) ---
+async function triggerAutoRecalculate() {
+  if (!currentCoords || isRecalculating) return;
+  const now = Date.now();
+  if (now - lastRecalcTimestamp < 15000) return; // Evita spam de pedidos (cooldown 15s)
+
+  isRecalculating = true;
+  lastRecalcTimestamp = now;
+  const toast = document.getElementById('offRouteToast');
+  if (toast) toast.hidden = false;
+
+  if (autoVoiceEnabled) {
+    speakInstruction('Fora de rota. A recalcular caminho.');
+  }
+
+  try {
+    const wps = activeTrip.waypoints || [];
+    const remainingWps = wps.filter((_, idx) => !doneWps.includes(idx));
+    const targetWps = remainingWps.length > 0 ? remainingWps : [wps[wps.length - 1]].filter(Boolean);
+
+    if (targetWps.length === 0) return;
+
+    const recalcPoints = [currentCoords, ...targetWps.map(w => [w.lat, w.lng])];
+    const recalcMeta = [{ name: 'Posição Atual', type: 'start' }, ...targetWps];
+    const osrmResult = await buildOsrmRouteFromPoints(recalcPoints, recalcMeta);
+
+    activeTrip.routeCoords = osrmResult.routeCoords;
+    activeTrip.tbtSteps = osrmResult.tbtSteps;
+    activeTrip.routingEngine = 'osrm';
+    announcedStages.clear();
+    activeTbtIndex = osrmResult.tbtSteps.length > 1 ? 1 : 0;
+
+    saveRoadTrip();
+    renderAllRoadUI();
+
+    if (autoVoiceEnabled && activeTrip.tbtSteps[activeTbtIndex]) {
+      speakInstruction(`Rota recalculada. ${activeTrip.tbtSteps[activeTbtIndex].instruction}`);
+    }
+  } catch (err) {
+    console.warn('Falha no recálculo automático:', err);
+  } finally {
+    isRecalculating = false;
+    setTimeout(() => { if (toast) toast.hidden = true; }, 3500);
+  }
+}
+
+// --- PAINEL TURN-BY-TURN & AVISOS DE VOZ TRIPLOS (1000m -> 300m -> 50m) ---
 function updateTurnByTurnPanel() {
   const steps = activeTrip.tbtSteps || [];
   document.getElementById('tbtSpeedBig').textContent = currentSpeedKmh;
 
+  const box = document.getElementById('tbtManeuverBox');
+  const exitPill = document.getElementById('tbtRoundaboutExit');
+
   if (steps.length === 0) {
     document.getElementById('tbtArrow').textContent = '↑';
+    exitPill.hidden = true;
+    document.getElementById('tbtRoadRef').textContent = 'MANOBRA';
     document.getElementById('tbtDistance').textContent = '—';
     document.getElementById('tbtStepCounter').textContent = '0/0';
     document.getElementById('tbtInstruction').textContent = 'Sem rota carregada';
-    document.getElementById('tbtNextPreview').textContent = 'Importa um ficheiro GPX no separador GPX/Sync';
+    document.getElementById('tbtNextPreview').textContent = 'Importa uma viagem ou GPX no separador GPX/Sync';
     return;
   }
 
@@ -504,27 +673,58 @@ function updateTurnByTurnPanel() {
   const step = steps[activeTbtIndex];
 
   document.getElementById('tbtArrow').textContent = step.arrow || '↑';
+  document.getElementById('tbtRoadRef').textContent = step.roadRef || 'MANOBRA';
   document.getElementById('tbtStepCounter').textContent = `${activeTbtIndex + 1}/${steps.length}`;
   document.getElementById('tbtInstruction').textContent = step.instruction;
   document.getElementById('tbtNextPreview').textContent = step.afterPreview || 'Mantém trajetória';
+
+  if (step.roundaboutExit) {
+    exitPill.textContent = step.roundaboutExit;
+    exitPill.hidden = false;
+  } else {
+    exitPill.hidden = true;
+  }
 
   let distMeters = null;
   if (currentCoords && step.lat && step.lng) {
     distMeters = calcDistanceMeters(currentCoords[0], currentCoords[1], step.lat, step.lng);
     document.getElementById('tbtDistance').textContent = formatDistanceLabel(distMeters);
 
-    if (distMeters <= 45 && activeTbtIndex < steps.length - 1) {
+    // Destaque visual vermelho nos últimos 120 metros antes da viragem
+    if (distMeters <= 120) {
+      box.classList.add('imminent');
+    } else {
+      box.classList.remove('imminent');
+    }
+
+    // Avançar automaticamente ao passar a menos de 35m do ponto de manobra
+    if (distMeters <= 35 && activeTbtIndex < steps.length - 1) {
       activeTbtIndex += 1;
       updateTurnByTurnPanel();
       return;
     }
-  } else {
-    document.getElementById('tbtDistance').textContent = formatDistanceLabel(step.legDistM || 0);
-  }
 
-  if (autoVoiceEnabled && distMeters !== null && distMeters <= 500 && !announcedTbtIndices.has(activeTbtIndex)) {
-    announcedTbtIndices.add(activeTbtIndex);
-    speakInstruction(`A ${formatDistanceLabel(distMeters)}, ${step.instruction}. ${step.afterPreview}`);
+    // Sistema de Voz Antecipada em 3 Estágios (1000m, 300m, 50m)
+    if (autoVoiceEnabled) {
+      if (!announcedStages.has(activeTbtIndex)) {
+        announcedStages.set(activeTbtIndex, new Set());
+      }
+      const spokenSet = announcedStages.get(activeTbtIndex);
+
+      if (distMeters <= 1050 && distMeters > 450 && !spokenSet.has('1000')) {
+        spokenSet.add('1000');
+        speakInstruction(`A um quilómetro, ${step.instruction}.`);
+      } else if (distMeters <= 320 && distMeters > 90 && !spokenSet.has('300')) {
+        spokenSet.add('300');
+        speakInstruction(`A ${formatDistanceLabel(distMeters)}, ${step.instruction}. ${step.afterPreview}`);
+      } else if (distMeters <= 65 && distMeters > 20 && !spokenSet.has('50')) {
+        spokenSet.add('50');
+        speakInstruction(`Agora, ${step.instruction}.`);
+      }
+    }
+  } else {
+    box.classList.remove('imminent');
+    document.getElementById('tbtDistance').textContent = formatDistanceLabel(step.legDistM || 0);
   }
 }
 
@@ -533,6 +733,13 @@ function renderAllRoadUI() {
   document.getElementById('hudTripTitle').textContent = activeTrip.tripTitle;
   document.getElementById('hudStageSubtitle').textContent = activeTrip.stageSubtitle || '';
   document.getElementById('importTripCodeInput').value = activeTrip.tripCode || '';
+
+  const engineBadge = document.getElementById('hudRouteEngineBadge');
+  if (activeTrip.routingEngine === 'osrm') {
+    engineBadge.textContent = '🛣️ RUAS + ROTUNDAS';
+  } else {
+    engineBadge.textContent = '🧭 TRAÇADO OFFLINE';
+  }
 
   const tank = activeTrip.tankCapacityL || 14.1;
   const avg = activeTrip.avgConsumptionL100 || 3.8;
@@ -587,13 +794,26 @@ function renderMap() {
   });
 }
 
+function getNextPendingWaypoint() {
+  const wps = activeTrip.waypoints || [];
+  const nextIdx = wps.findIndex((_, i) => !doneWps.includes(i));
+  return nextIdx !== -1 ? wps[nextIdx] : wps[wps.length - 1];
+}
+
+function openInOrganicMaps(lat, lng, label = 'Destino MOTOATLAS') {
+  if (!lat || !lng) return;
+  const encodedName = encodeURIComponent(label);
+  // Esquema nativo om:// para Organic Maps no iOS com fallback para geo: / Apple Maps
+  const omUrl = `om://map?v=1&ll=${lat.toFixed(6)},${lng.toFixed(6)}&n=${encodedName}`;
+  window.location.href = omUrl;
+}
+
 function renderRoadbookList() {
   const listEl = document.getElementById('roadWpList');
   const wps = activeTrip.waypoints || [];
   listEl.innerHTML = '';
 
-  const nextIdx = wps.findIndex((_, i) => !doneWps.includes(i));
-  const nextWp = nextIdx !== -1 ? wps[nextIdx] : wps[wps.length - 1];
+  const nextWp = getNextPendingWaypoint();
   if (nextWp) {
     document.getElementById('nextWpTitle').textContent = `${PIN_ICONS[nextWp.type] || '📍'} ${nextWp.name}`;
     document.getElementById('nextWpDist').textContent = `Km ${nextWp.km}`;
@@ -608,7 +828,10 @@ function renderRoadbookList() {
         <strong>${PIN_ICONS[wp.type] || '📍'} ${wp.name}</strong>
         <small>Km ${wp.km}</small>
       </div>
-      <button type="button" class="btn-glove-sm" onclick="event.stopPropagation(); focusRoadWp(${idx})">🎯</button>
+      <div class="wp-item-actions">
+        <button type="button" class="btn-glove-sm" title="Centrar no mapa" onclick="event.stopPropagation(); focusRoadWp(${idx})">🎯</button>
+        <button type="button" class="btn-glove-sm organic-btn" title="Navegar no Organic Maps" onclick="event.stopPropagation(); openWpOrganic(${idx})">🗺️</button>
+      </div>
     `;
     row.addEventListener('click', () => {
       if (doneWps.includes(idx)) {
@@ -625,7 +848,12 @@ function renderRoadbookList() {
 
 window.focusRoadWp = function(idx) {
   const wp = (activeTrip.waypoints || [])[idx];
-  if (wp && map) map.setView([wp.lat, wp.lng], 14);
+  if (wp && map) map.setView([wp.lat, wp.lng], 15);
+};
+
+window.openWpOrganic = function(idx) {
+  const wp = (activeTrip.waypoints || [])[idx];
+  if (wp) openInOrganicMaps(wp.lat, wp.lng, wp.name);
 };
 
 function renderRoadExpenses() {
@@ -647,12 +875,90 @@ function renderRoadExpenses() {
       `).join('');
 }
 
+// --- PRÉ-CACHE DE BLOCOS DO MAPA OPENSTREETMAP PARA ZONAS SEM REDE ---
+async function preCacheRouteMapTiles() {
+  const fb = document.getElementById('roadSyncFeedback');
+  const coords = activeTrip.routeCoords || [];
+  if (coords.length < 2) {
+    fb.textContent = '⚠️ Carrega primeiro uma viagem ou rota.';
+    return;
+  }
+
+  const zooms = [11, 13, 14];
+  const tileUrls = new Set();
+
+  const step = Math.max(1, Math.floor(coords.length / 45));
+  for (let i = 0; i < coords.length; i += step) {
+    const [lat, lon] = coords[i];
+    zooms.forEach(z => {
+      const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
+      const latRad = (lat * Math.PI) / 180;
+      const y = Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * Math.pow(2, z));
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          tileUrls.add(`https://a.tile.openstreetmap.org/${z}/${x + dx}/${y + dy}.png`);
+        }
+      }
+    });
+  }
+
+  const urls = Array.from(tileUrls).slice(0, 260);
+  fb.textContent = `⏳ A guardar ${urls.length} blocos de mapa offline no iPhone...`;
+
+  let saved = 0;
+  for (const u of urls) {
+    try {
+      await fetch(u, { mode: 'no-cors' });
+      saved++;
+      if (saved % 40 === 0) {
+        fb.textContent = `⏳ Cache offline: ${saved}/${urls.length} blocos guardados...`;
+      }
+    } catch {
+      // Ignora falhas pontuais
+    }
+  }
+  fb.textContent = `✅ ${saved} blocos de mapa guardados em cache offline para a rota!`;
+}
+
+// --- EXPORTAR ROTA COMPLETA EM GPX PARA ORGANIC MAPS / OSMAND ---
+function exportActiveRouteAsGpx() {
+  const coords = activeTrip.routeCoords || [];
+  const wps = activeTrip.waypoints || [];
+  if (coords.length < 2) return;
+
+  const esc = s => String(s || '').replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+
+  const wptXml = wps.map(w => `  <wpt lat="${w.lat}" lon="${w.lng}"><name>${esc(w.name)}</name></wpt>`).join('
+');
+  const trkXml = coords.map(([lat, lng]) => `      <trkpt lat="${lat}" lon="${lng}"></trkpt>`).join('
+');
+
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MOTOATLAS Road v1.4" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>${esc(activeTrip.tripTitle)}</name></metadata>
+${wptXml}
+  <trk>
+    <name>${esc(activeTrip.tripTitle)}</name>
+    <trkseg>
+${trkXml}
+    </trkseg>
+  </trk>
+</gpx>`;
+
+  const blob = new Blob([gpx], { type: 'application/gpx+xml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(activeTrip.tripCode || 'rota').toLowerCase()}_motoatlas.gpx`;
+  a.click();
+}
+
 function toggleGps() {
   const btn = document.getElementById('btnToggleGps');
   if (gpsWatchId !== null) {
     navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
     currentSpeedKmh = 0;
+    releaseScreenWakeLock();
     btn.textContent = '📡 GPS: OFF';
     document.getElementById('telSpeed').innerHTML = `0 <small>km/h</small>`;
     document.getElementById('tbtSpeedBig').textContent = '0';
@@ -664,6 +970,7 @@ function toggleGps() {
     return;
   }
 
+  requestScreenWakeLock();
   btn.textContent = '📡 GPS: ON';
   gpsWatchId = navigator.geolocation.watchPosition(
     (pos) => {
@@ -685,12 +992,19 @@ function toggleGps() {
         gpsMarker.setLatLng(currentCoords);
       }
       map.panTo(currentCoords);
+
+      // Verificar se saiu mais de 85 metros da rota para recalcular automaticamente
+      const offDist = distanceToRouteMeters(latitude, longitude, activeTrip.routeCoords || []);
+      if (offDist > 85) {
+        triggerAutoRecalculate();
+      }
+
       updateTurnByTurnPanel();
     },
     (err) => {
       alert(`Erro GPS: ${err.message}`);
     },
-    { enableHighAccuracy: true, maximumAge: 2000 }
+    { enableHighAccuracy: true, maximumAge: 1500 }
   );
 }
 
@@ -721,7 +1035,7 @@ async function pullTripByCodeFromSupabase() {
     return;
   }
 
-  fb.textContent = `⏳ A descarregar "${code}" do Studio...`;
+  fb.textContent = `⏳ A descarregar "${code}" e a calcular ruas & rotundas...`;
   try {
     const resp = await fetch(`${url}/rest/v1/motoatlas_trips?trip_code=eq.${encodeURIComponent(code)}&select=*`, {
       headers: { 'apikey': key, 'Authorization': `Bearer ${key}` }
@@ -733,11 +1047,12 @@ async function pullTripByCodeFromSupabase() {
     }
     activeTrip = rows[0].payload;
     doneWps = [];
-    announcedTbtIndices.clear();
-    ensureTurnStepsReady();
+    announcedStages.clear();
+    await enrichActiveTripWithOsrm();
+    activeTbtIndex = activeTrip.tbtSteps.length > 1 ? 1 : 0;
     saveRoadTrip();
     renderAllRoadUI();
-    fb.textContent = `✅ Viagem "${activeTrip.tripTitle}" carregada (${activeTrip.tbtSteps.length} manobras)!`;
+    fb.textContent = `✅ Viagem "${activeTrip.tripTitle}" pronta (${activeTrip.tbtSteps.length} instruções com ruas e rotundas)!`;
   } catch (err) {
     fb.textContent = `❌ Erro de rede: ${err.message}`;
   }
@@ -777,6 +1092,56 @@ async function pushCompletedTripBackToStudio() {
   }
 }
 
+function parseGpxBasic(xmlText, fileName = 'Rota GPX') {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('Ficheiro GPX inválido.');
+
+  const trkName = doc.querySelector('trk > name')?.textContent?.trim()
+    || doc.querySelector('rte > name')?.textContent?.trim()
+    || fileName.replace(/\.gpx$/i, '');
+
+  let ptNodes = Array.from(doc.querySelectorAll('trkpt'));
+  if (ptNodes.length < 2) ptNodes = Array.from(doc.querySelectorAll('rtept'));
+
+  const routeCoords = ptNodes
+    .map(pt => [parseFloat(pt.getAttribute('lat')), parseFloat(pt.getAttribute('lon'))])
+    .filter(([lat, lng]) => !Number.isNaN(lat) && !Number.isNaN(lng));
+
+  if (routeCoords.length < 2) throw new Error('GPX sem pontos suficientes.');
+
+  const wptNodes = Array.from(doc.querySelectorAll('wpt'));
+  const waypoints = wptNodes.length >= 2
+    ? wptNodes.map((wpt, idx) => ({
+        name: wpt.querySelector('name')?.textContent?.trim() || `Paragem ${idx + 1}`,
+        type: idx === 0 ? 'start' : (idx === wptNodes.length - 1 ? 'sleep' : 'viewpoint'),
+        lat: parseFloat(wpt.getAttribute('lat')),
+        lng: parseFloat(wpt.getAttribute('lon')),
+        km: 0
+      }))
+    : [
+        { name: `Partida: ${trkName}`, type: 'start', lat: routeCoords[0][0], lng: routeCoords[0][1], km: 0 },
+        { name: `Chegada: ${trkName}`, type: 'sleep', lat: routeCoords[routeCoords.length - 1][0], lng: routeCoords[routeCoords.length - 1][1], km: 0 }
+      ];
+
+  return {
+    id: `gpx-${Date.now()}`,
+    tripCode: `GPX-${Math.floor(100 + Math.random() * 900)}`,
+    profile: 'moto',
+    routingEngine: 'geometry',
+    tripTitle: trkName,
+    stageSubtitle: 'A processar rota...',
+    stageDistanceKm: 0,
+    odometerKm: activeTrip.odometerKm || 0,
+    tankCapacityL: activeTrip.tankCapacityL || 14.1,
+    avgConsumptionL100: activeTrip.avgConsumptionL100 || 3.8,
+    waypoints,
+    routeCoords,
+    tbtSteps: [],
+    expenses: []
+  };
+}
+
 function bindEvents() {
   document.getElementById('btnThemeToggle').addEventListener('click', () => {
     const curr = document.documentElement.getAttribute('data-theme');
@@ -787,15 +1152,9 @@ function bindEvents() {
     const mapEl = document.getElementById('road-map');
     mapDimLevel = (mapDimLevel + 1) % 3;
     mapEl.classList.remove('night-dim-75', 'night-dim-55');
-    if (mapDimLevel === 0) {
-      e.target.textContent = '🌘 100%';
-    } else if (mapDimLevel === 1) {
-      mapEl.classList.add('night-dim-75');
-      e.target.textContent = '🌘 75%';
-    } else {
-      mapEl.classList.add('night-dim-55');
-      e.target.textContent = '🌘 55%';
-    }
+    if (mapDimLevel === 0) e.target.textContent = '🌘 100%';
+    else if (mapDimLevel === 1) { mapEl.classList.add('night-dim-75'); e.target.textContent = '🌘 75%'; }
+    else { mapEl.classList.add('night-dim-55'); e.target.textContent = '🌘 55%'; }
   });
 
   document.getElementById('btnToggleAutoVoice').addEventListener('click', (e) => {
@@ -803,22 +1162,31 @@ function bindEvents() {
     e.target.textContent = autoVoiceEnabled ? '🔊 Voz: ON' : '🔇 Voz: OFF';
     document.getElementById('voiceStatusBadge').textContent = autoVoiceEnabled ? '🔊 Voz: ON' : '🔇 Voz: OFF';
     if (autoVoiceEnabled) {
-      const steps = activeTrip.tbtSteps || [];
-      const step = steps[activeTbtIndex];
-      if (step) {
-        speakInstruction(`Voz ativada. Próxima manobra: ${step.instruction}`);
-      }
+      const step = (activeTrip.tbtSteps || [])[activeTbtIndex];
+      if (step) speakInstruction(`Voz ativada. Próxima manobra: ${step.instruction}`);
     } else if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
   });
 
   document.getElementById('btnTbtRepeatVoice').addEventListener('click', () => {
-    const steps = activeTrip.tbtSteps || [];
-    const step = steps[activeTbtIndex];
+    const step = (activeTrip.tbtSteps || [])[activeTbtIndex];
     if (!step) return;
     const dist = document.getElementById('tbtDistance').textContent;
     speakInstruction(`A ${dist}, ${step.instruction}. ${step.afterPreview}`);
+  });
+
+  document.getElementById('btnTbtRecalcNow').addEventListener('click', async () => {
+    if (currentCoords) {
+      lastRecalcTimestamp = 0;
+      await triggerAutoRecalculate();
+    } else {
+      await enrichActiveTripWithOsrm();
+      activeTbtIndex = activeTrip.tbtSteps.length > 1 ? 1 : 0;
+      saveRoadTrip();
+      renderAllRoadUI();
+      speakInstruction('Rota atualizada com nomes de ruas e rotundas.');
+    }
   });
 
   document.getElementById('btnTbtPrevStep').addEventListener('click', () => {
@@ -843,20 +1211,37 @@ function bindEvents() {
     }
   });
 
+  document.getElementById('btnEnrichRouteOsrm').addEventListener('click', async () => {
+    const fb = document.getElementById('roadSyncFeedback');
+    fb.textContent = '⏳ A obter nomes de ruas, saídas de rotundas e traçado exato...';
+    const ok = await enrichActiveTripWithOsrm();
+    announcedStages.clear();
+    activeTbtIndex = activeTrip.tbtSteps.length > 1 ? 1 : 0;
+    saveRoadTrip();
+    renderAllRoadUI();
+    fb.textContent = ok
+      ? `✅ Rota atualizada com ${activeTrip.tbtSteps.length} instruções reais (ruas e rotundas)!`
+      : '⚠️ Sem ligação à internet — mantido modo offline geométrico.';
+  });
+
+  document.getElementById('btnCacheMapTiles').addEventListener('click', preCacheRouteMapTiles);
+  document.getElementById('btnExportRouteGpx').addEventListener('click', exportActiveRouteAsGpx);
+
   document.getElementById('roadGpxFileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const fb = document.getElementById('roadSyncFeedback');
     try {
       const xmlText = await file.text();
-      const sens = parseInt(document.getElementById('gpxTurnSensitivity').value || '42', 10);
-      activeTrip = parseGpxXml(xmlText, sens, file.name);
+      activeTrip = parseGpxBasic(xmlText, file.name);
       doneWps = [];
-      announcedTbtIndices.clear();
-      ensureTurnStepsReady();
+      announcedStages.clear();
+      fb.textContent = '⏳ A associar nomes de ruas e rotundas ao GPX...';
+      await enrichActiveTripWithOsrm();
+      activeTbtIndex = activeTrip.tbtSteps.length > 1 ? 1 : 0;
       saveRoadTrip();
       renderAllRoadUI();
-      fb.textContent = `✅ GPX "${activeTrip.tripTitle}" importado! Foram geradas ${activeTrip.tbtSteps.length} instruções Turn-by-Turn.`;
+      fb.textContent = `✅ GPX "${activeTrip.tripTitle}" pronto (${activeTrip.tbtSteps.length} instruções)!`;
     } catch (err) {
       fb.textContent = `❌ Erro ao ler GPX: ${err.message}`;
     } finally {
@@ -864,29 +1249,18 @@ function bindEvents() {
     }
   });
 
-  document.getElementById('gpxTurnSensitivity').addEventListener('change', () => {
-    if (!activeTrip.routeCoords || activeTrip.routeCoords.length < 2) return;
-    const sens = parseInt(document.getElementById('gpxTurnSensitivity').value || '42', 10);
-    activeTrip.tbtSteps = generateTurnStepsFromCoords(
-      activeTrip.routeCoords,
-      activeTrip.waypoints || [],
-      sens
-    );
-    activeTrip.stageSubtitle = `GPX • ${activeTrip.stageDistanceKm} km • ${activeTrip.tbtSteps.length} manobras`;
-    announcedTbtIndices.clear();
-    ensureTurnStepsReady();
-    saveRoadTrip();
-    renderAllRoadUI();
-    document.getElementById('roadSyncFeedback').textContent = `🔄 Curvas recalculadas (${activeTrip.tbtSteps.length} manobras detetadas).`;
-  });
-
   document.getElementById('btnToggleGps').addEventListener('click', toggleGps);
   document.getElementById('btnCenterRoute').addEventListener('click', renderMap);
 
+  document.getElementById('btnOpenOrganicMaps').addEventListener('click', () => {
+    const nextWp = getNextPendingWaypoint();
+    if (nextWp) openInOrganicMaps(nextWp.lat, nextWp.lng, nextWp.name);
+  });
+
   document.getElementById('btnShareCoords').addEventListener('click', () => {
-    const wps = activeTrip.waypoints || [];
-    const lat = currentCoords ? currentCoords[0] : wps[0]?.lat;
-    const lng = currentCoords ? currentCoords[1] : wps[0]?.lng;
+    const nextWp = getNextPendingWaypoint();
+    const lat = currentCoords ? currentCoords[0] : nextWp?.lat;
+    const lng = currentCoords ? currentCoords[1] : nextWp?.lng;
     if (!lat || !lng) return;
     const msg = `MOTOATLAS (${activeTrip.tripCode}): https://maps.google.com/?q=${lat.toFixed(5)},${lng.toFixed(5)}`;
     if (navigator.share) {
@@ -916,15 +1290,7 @@ ${msg}`);
     }
 
     activeTrip.expenses = activeTrip.expenses || [];
-    activeTrip.expenses.push({
-      id: Date.now(),
-      category: cat,
-      amount,
-      payer,
-      liters,
-      tripKm,
-      note
-    });
+    activeTrip.expenses.push({ id: Date.now(), category: cat, amount, payer, liters, tripKm, note });
 
     saveRoadTrip();
     renderAllRoadUI();
@@ -935,14 +1301,17 @@ ${msg}`);
   document.getElementById('roadJsonFileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const fb = document.getElementById('roadSyncFeedback');
     const parsed = JSON.parse(await file.text());
     activeTrip = parsed.trip ? parsed.trip : parsed;
     doneWps = [];
-    announcedTbtIndices.clear();
-    ensureTurnStepsReady();
+    announcedStages.clear();
+    fb.textContent = '⏳ A enriquecer viagem com ruas e rotundas...';
+    await enrichActiveTripWithOsrm();
+    activeTbtIndex = activeTrip.tbtSteps.length > 1 ? 1 : 0;
     saveRoadTrip();
     renderAllRoadUI();
-    document.getElementById('roadSyncFeedback').textContent = `✅ Viagem "${activeTrip.tripTitle}" importada (${activeTrip.tbtSteps.length} manobras)!`;
+    fb.textContent = `✅ Viagem "${activeTrip.tripTitle}" importada (${activeTrip.tbtSteps.length} instruções)!`;
   });
 
   document.getElementById('btnDownloadReturnJson').addEventListener('click', () => {
