@@ -1,7 +1,7 @@
 {
   "name": "MOTOATLAS Road",
   "short_name": "MOTOATLAS Road",
-  "description": "Cockpit de Guiador: Mapa Detalhado OSM + Voz + Painel Turn-by-Turn",
+  "description": "Cockpit de Guiador: Mapa Detalhado OSM + Voz + Painel Turn-by-Turn GPX",
   "start_url": "./index.html",
   "display": "standalone",
   "orientation": "landscape",

@@ -1,8 +1,10 @@
-# MOTOATLAS Road v1.1 (Cockpit de Guiador & Turn-by-Turn)
+# MOTOATLAS Road v1.2 (Cockpit de Guiador & Motor Turn-by-Turn GPX)
 
-## Novidades da Versão 1.1
-- **Mapa OSM Standard Sempre Detalhado:** Mosaico OpenStreetMap Standard gratuito, sem API Key, mantendo todo o detalhe de estradas nacionais, localidades, curvas e topografia independentemente de a interface estar em Modo Escuro ou Modo Claro. Inclui botão rápido de redução suave de brilho noturno (`100% / 75% / 55%`) diretamente no mapa.
-- **Seletor Rápido no Painel Estrada & Mapa (`🗺️ Mapa + Voz` vs. `🧭 Turn-by-Turn`):**
-  - **Modo `🗺️ Mapa + Voz`:** Exibe o mapa detalhado com traçado e paragens e ativa leitura automática por voz (Web Speech API) na aproximação às curvas e pontos do roadbook.
-  - **Modo `🧭 Turn-by-Turn`:** Substitui o mapa por um painel escuro de alto contraste com seta direcional grande (`↱`, `↰`, `↑`, `↻`), distância em tempo real via GPS, velocidade atual (`km/h`), pré-visualização **"A SEGUIR"** e botão grande para repetir a instrução no intercomunicador.
-- **Navegação 100% Autónoma:** Removida a ligação externa "Abrir Maps/Organic" para manter o piloto focado no cockpit integrado.
+## Novidades da Versão 1.2
+- **Importação Direta de Ficheiros GPX (`.gpx`) com Análise Geométrica de Curvas:**
+  - Lê pontos de traçado (`<trkpt>` / `<rtept>`) e paragens (`<wpt>`), simplifica o ruído de GPS e calcula as variações de azimute ao longo da estrada.
+  - Gera automaticamente cada manobra com **seta direcional** (`↗`, `↖`, `↱`, `↰`, `↻`, `↑`, `🏁`), **ângulo da curva**, **distância exata** até à manobra e **pré-visualização "A SEGUIR"**.
+  - Inclui **seletor de sensibilidade** (`28°` Estradas Nacionais & Curvas, `42°` Equilibrado, `65°` Viragens Acentuadas & Ganchos) para recalcular a lista de manobras em tempo real.
+- **Avanço Automático por GPS & Controlo Manual de Luvas:**
+  - Quando o GPS passa a menos de 45 m da curva atual, o painel avança automaticamente para a manobra seguinte e lê a instrução por voz (`Web Speech API`) 500 m antes da próxima curva.
+  - Botões `⏮️ Anterior` e `⏭️ Próxima` no painel Turn-by-Turn para navegar pelas curvas do percurso.

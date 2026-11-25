@@ -402,6 +402,24 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
+  width: 100%;
+}
+
+.tbt-step-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.tbt-counter-pill {
+  background: #1f2937;
+  border: 1px solid #4b5563;
+  color: #f59e0b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.12rem 0.45rem;
+  border-radius: 6px;
 }
 
 .tbt-lbl {
@@ -479,8 +497,8 @@ body {
 
 .tbt-bottom-actions {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
-  gap: 0.6rem;
+  grid-template-columns: 1.4fr 0.8fr 0.8fr;
+  gap: 0.5rem;
 }
 
 .btn-tbt-voice {
@@ -488,8 +506,8 @@ body {
   color: #000000;
   border: none;
   border-radius: 12px;
-  padding: 0.85rem 1rem;
-  font-size: 0.98rem;
+  padding: 0.85rem 0.9rem;
+  font-size: 0.94rem;
   font-weight: 900;
   cursor: pointer;
 }
@@ -499,8 +517,8 @@ body {
   color: #ffffff;
   border: 2px solid #4b5563;
   border-radius: 12px;
-  padding: 0.85rem 0.8rem;
-  font-size: 0.9rem;
+  padding: 0.85rem 0.65rem;
+  font-size: 0.88rem;
   font-weight: 800;
   cursor: pointer;
 }
@@ -632,6 +650,13 @@ input, select {
   border-radius: 10px;
   color: var(--text);
   cursor: pointer;
+  font-weight: 700;
+}
+
+.file-drop-glove.gpx-highlight {
+  border-color: var(--accent);
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--accent);
 }
 
 .road-exp-list {

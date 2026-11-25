@@ -1,4 +1,4 @@
-// MOTOATLAS Road v1.1 — Cockpit de Guiador (Mapa OSM Detalhado + Voz Auto + Painel Turn-by-Turn)
+// MOTOATLAS Road v1.2 — Cockpit de Guiador (Mapa OSM + Voz + Motor Turn-by-Turn GPX Automático)
 const ROAD_ACTIVE_TRIP_KEY = 'motoatlas_road_v1_active_trip';
 const ROAD_DONE_WPS_KEY = 'motoatlas_road_v1_done_wps';
 const SB_URL_KEY = 'motoatlas_supabase_url';
@@ -76,6 +76,7 @@ const DEFAULT_DEMO_TRIP = {
     [38.1200, -5.5600],
     [37.8882, -4.7794]
   ],
+  tbtSteps: [],
   expenses: []
 };
 
@@ -84,7 +85,8 @@ const PIN_ICONS = {
   fuel: '⛽',
   viewpoint: '📸',
   monument: '🏛️',
-  sleep: '🏨'
+  sleep: '🏨',
+  turn: '↱'
 };
 
 let activeTrip = loadRoadTrip();
@@ -92,14 +94,16 @@ let doneWps = JSON.parse(localStorage.getItem(ROAD_DONE_WPS_KEY) || '[]');
 let map = null;
 let routeLayer = null;
 let markersLayer = null;
+let turnMarkersLayer = null;
 let gpsMarker = null;
 let gpsWatchId = null;
 let currentCoords = null;
 let currentSpeedKmh = 0;
 
-// Estado de Voz & Contraste do Mapa
+// Estado de Navegação Turn-by-Turn & Voz
+let activeTbtIndex = 0;
 let autoVoiceEnabled = true;
-let announcedWpIndices = new Set();
+let announcedTbtIndices = new Set();
 let mapDimLevel = 0; // 0 = 100%, 1 = 75%, 2 = 55%
 
 function loadRoadTrip() {
@@ -120,6 +124,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initTopNavigation();
   initNavModeSwitcher();
   initMap();
+  ensureTurnStepsReady();
   loadSbInputs();
   renderAllRoadUI();
   bindEvents();
@@ -166,12 +171,12 @@ function initNavModeSwitcher() {
 // --- MAPA OSM STANDARD SEMPRE DETALHADO E INDEPENDENTE DO TEMA ---
 function initMap() {
   map = L.map('road-map', { zoomControl: false }).setView([38.5, -8.0], 7);
-  // Mosaico OpenStreetMap Standard gratuito, sem API Key, com todo o detalhe de estradas nacionais, curvas e localidades
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap'
   }).addTo(map);
   routeLayer = L.layerGroup().addTo(map);
+  turnMarkersLayer = L.layerGroup().addTo(map);
   markersLayer = L.layerGroup().addTo(map);
 }
 
@@ -190,7 +195,7 @@ function speakInstruction(text) {
   }
 }
 
-// --- CÁLCULO GEODÉSICO DE DISTÂNCIA (HAVERSINE EM METROS) ---
+// --- GEOMETRIA ESFÉRICA: DISTÂNCIA (HAVERSINE) E AZIMUTE (BEARING) ---
 function calcDistanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = deg => (deg * Math.PI) / 180;
@@ -200,7 +205,48 @@ function calcDistanceMeters(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function calcBearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = deg => (deg * Math.PI) / 180;
+  const toDeg = rad => (rad * 180) / Math.PI;
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const dLambda = toRad(lon2 - lon1);
+  const y = Math.sin(dLambda) * Math.cos(phi2);
+  const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function normalizeTurnAngle(bearing1, bearing2) {
+  // Positivo = viragem à direita (0..180); Negativo = viragem à esquerda (-180..0)
+  let diff = ((bearing2 - bearing1 + 540) % 360) - 180;
+  return diff;
+}
+
+function classifyTurnAngle(deltaDeg) {
+  const abs = Math.abs(deltaDeg);
+  const isRight = deltaDeg > 0;
+  if (abs >= 135) {
+    return {
+      arrow: '↻',
+      label: isRight ? 'Inversão / Gancho fechado à direita' : 'Inversão / Gancho fechado à esquerda',
+      shortLabel: isRight ? 'gancho à direita' : 'gancho à esquerda'
+    };
+  }
+  if (abs >= 65) {
+    return {
+      arrow: isRight ? '↱' : '↰',
+      label: isRight ? 'Vira à direita' : 'Vira à esquerda',
+      shortLabel: isRight ? 'viragem à direita' : 'viragem à esquerda'
+    };
+  }
+  return {
+    arrow: isRight ? '↗' : '↖',
+    label: isRight ? 'Curva ligeira à direita' : 'Curva ligeira à esquerda',
+    shortLabel: isRight ? 'curva ligeira à direita' : 'curva ligeira à esquerda'
+  };
 }
 
 function formatDistanceLabel(meters) {
@@ -210,57 +256,292 @@ function formatDistanceLabel(meters) {
   return `${Math.max(0, Math.round(meters / 10) * 10)} m`;
 }
 
-function getNextWaypointData() {
-  const wps = activeTrip.waypoints || [];
-  if (wps.length === 0) return { wp: null, idx: -1, nextWp: null };
-  const idx = wps.findIndex((_, i) => !doneWps.includes(i));
-  const activeIdx = idx !== -1 ? idx : wps.length - 1;
-  const wp = wps[activeIdx];
-  const nextWp = activeIdx + 1 < wps.length ? wps[activeIdx + 1] : null;
-  return { wp, idx: activeIdx, nextWp };
+// --- MOTOR AUTOMÁTICO DE EXTRAÇÃO DE CURVAS A PARTIR DE TRAÇADO GPX ---
+function generateTurnStepsFromCoords(coords, waypoints = [], minAngleDeg = 42) {
+  if (!coords || coords.length < 2) return [];
+
+  // 1. Sub-amostragem espacial para eliminar ruído GPS (< 35 m entre pontos consecutivos)
+  const simplified = [coords[0]];
+  for (let i = 1; i < coords.length - 1; i++) {
+    const prev = simplified[simplified.length - 1];
+    if (calcDistanceMeters(prev[0], prev[1], coords[i][0], coords[i][1]) >= 35) {
+      simplified.push(coords[i]);
+    }
+  }
+  simplified.push(coords[coords.length - 1]);
+
+  // Calcular distância acumulada em cada vértice simplificado
+  const cumDistMeters = [0];
+  for (let i = 1; i < simplified.length; i++) {
+    const d = calcDistanceMeters(
+      simplified[i - 1][0], simplified[i - 1][1],
+      simplified[i][0], simplified[i][1]
+    );
+    cumDistMeters.push(cumDistMeters[i - 1] + d);
+  }
+
+  const rawSteps = [];
+
+  // Passo inicial: Partida
+  rawSteps.push({
+    lat: simplified[0][0],
+    lng: simplified[0][1],
+    cumDistM: 0,
+    arrow: '↑',
+    instruction: waypoints[0]?.name ? `Partida: ${waypoints[0].name}` : 'Início da rota GPX — segue em frente',
+    shortDesc: 'início da rota',
+    isWaypoint: Boolean(waypoints[0])
+  });
+
+  // 2. Deteção de mudanças de azimute (curvas e viragens) ao longo do traçado
+  let lastTurnCumDistM = 0;
+  for (let i = 1; i < simplified.length - 1; i++) {
+    // Janela de olhar atrás/à frente (~60-120 m) para medir o ângulo real da estrada e não zig-zag de GPS
+    const backIdx = Math.max(0, i - 2);
+    const fwdIdx = Math.min(simplified.length - 1, i + 2);
+
+    const bIn = calcBearingDeg(
+      simplified[backIdx][0], simplified[backIdx][1],
+      simplified[i][0], simplified[i][1]
+    );
+    const bOut = calcBearingDeg(
+      simplified[i][0], simplified[i][1],
+      simplified[fwdIdx][0], simplified[fwdIdx][1]
+    );
+
+    const delta = normalizeTurnAngle(bIn, bOut);
+    const absDelta = Math.abs(delta);
+    const distSinceLastTurn = cumDistMeters[i] - lastTurnCumDistM;
+
+    if (absDelta >= minAngleDeg && distSinceLastTurn >= 90) {
+      const turnInfo = classifyTurnAngle(delta);
+      const kmMark = (cumDistMeters[i] / 1000).toFixed(1);
+      rawSteps.push({
+        lat: simplified[i][0],
+        lng: simplified[i][1],
+        cumDistM: cumDistMeters[i],
+        arrow: turnInfo.arrow,
+        instruction: `${turnInfo.label} (${Math.round(absDelta)}°) • Km ${kmMark}`,
+        shortDesc: turnInfo.shortLabel,
+        isWaypoint: false
+      });
+      lastTurnCumDistM = cumDistMeters[i];
+    }
+  }
+
+  // 3. Inserir paragens/waypoints intermédios do GPX (se existirem)
+  if (waypoints.length > 2) {
+    for (let w = 1; w < waypoints.length - 1; w++) {
+      const wp = waypoints[w];
+      // Encontrar ponto mais próximo no traçado para calcular distância acumulada
+      let bestDistM = Infinity;
+      let bestCumM = (wp.km || 0) * 1000;
+      for (let i = 0; i < simplified.length; i++) {
+        const d = calcDistanceMeters(wp.lat, wp.lng, simplified[i][0], simplified[i][1]);
+        if (d < bestDistM) {
+          bestDistM = d;
+          bestCumM = cumDistMeters[i];
+        }
+      }
+      rawSteps.push({
+        lat: wp.lat,
+        lng: wp.lng,
+        cumDistM: bestCumM,
+        arrow: wp.arrow || '📍',
+        instruction: `Paragem Roadbook: ${wp.name} (Km ${(bestCumM / 1000).toFixed(1)})`,
+        shortDesc: wp.name,
+        isWaypoint: true
+      });
+    }
+  }
+
+  // Ordenar passos por distância acumulada ao longo da rota
+  rawSteps.sort((a, b) => a.cumDistM - b.cumDistM);
+
+  // Passo final: Chegada
+  const totalDistM = cumDistMeters[cumDistMeters.length - 1];
+  const lastWp = waypoints[waypoints.length - 1];
+  rawSteps.push({
+    lat: simplified[simplified.length - 1][0],
+    lng: simplified[simplified.length - 1][1],
+    cumDistM: totalDistM,
+    arrow: '🏁',
+    instruction: lastWp?.name ? `Chegada: ${lastWp.name}` : `Chegada ao destino GPX (Km ${(totalDistM / 1000).toFixed(1)})`,
+    shortDesc: 'chegada ao destino',
+    isWaypoint: true
+  });
+
+  // 4. Calcular distância entre manobras consecutivas e preencher o campo "A SEGUIR"
+  for (let i = 0; i < rawSteps.length; i++) {
+    const prevCum = i > 0 ? rawSteps[i - 1].cumDistM : 0;
+    rawSteps[i].legDistM = Math.max(0, Math.round(rawSteps[i].cumDistM - prevCum));
+
+    if (i + 1 < rawSteps.length) {
+      const nextStep = rawSteps[i + 1];
+      const gapM = Math.max(0, Math.round(nextStep.cumDistM - rawSteps[i].cumDistM));
+      rawSteps[i].afterPreview = `Depois: ${nextStep.shortDesc} a ${formatDistanceLabel(gapM)}`;
+    } else {
+      rawSteps[i].afterPreview = 'Fim do percurso — estacionamento e descanso';
+    }
+  }
+
+  return rawSteps;
 }
 
-function inferManeuverFromWaypoint(wp, nextWp) {
-  const arrow = wp.arrow || (wp.type === 'fuel' ? '↻' : wp.type === 'sleep' ? '🏁' : '↱');
-  const instruction = wp.maneuver || `${wp.name} (Marco Km ${wp.km})`;
-  const afterPreview = wp.afterPreview || (nextWp
-    ? `Depois: segue para ${nextWp.name} (Km ${nextWp.km})`
-    : 'Depois: chegada ao destino final da etapa');
-  return { arrow, instruction, afterPreview };
+function parseGpxXml(xmlText, minAngleDeg = 42, fileName = 'Rota GPX') {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  if (doc.querySelector('parsererror')) {
+    throw new Error('Ficheiro GPX inválido ou corrompido.');
+  }
+
+  // Extrair nome da rota/track
+  const trkName = doc.querySelector('trk > name')?.textContent?.trim()
+    || doc.querySelector('rte > name')?.textContent?.trim()
+    || doc.querySelector('metadata > name')?.textContent?.trim()
+    || fileName.replace(/\.gpx$/i, '');
+
+  // Extrair pontos de traçado (<trkpt> ou fallback para <rtept>)
+  let ptNodes = Array.from(doc.querySelectorAll('trkpt'));
+  if (ptNodes.length < 2) {
+    ptNodes = Array.from(doc.querySelectorAll('rtept'));
+  }
+
+  const routeCoords = ptNodes
+    .map(pt => [parseFloat(pt.getAttribute('lat')), parseFloat(pt.getAttribute('lon'))])
+    .filter(([lat, lng]) => !Number.isNaN(lat) && !Number.isNaN(lng));
+
+  if (routeCoords.length < 2) {
+    throw new Error('O ficheiro GPX não contém pontos de traçado (<trkpt> ou <rtept>) suficientes.');
+  }
+
+  // Extrair waypoints (<wpt>)
+  const wptNodes = Array.from(doc.querySelectorAll('wpt'));
+  const parsedWaypoints = wptNodes.map((wpt, idx) => {
+    const lat = parseFloat(wpt.getAttribute('lat'));
+    const lng = parseFloat(wpt.getAttribute('lon'));
+    const name = wpt.querySelector('name')?.textContent?.trim() || `Ponto ${idx + 1}`;
+    const lower = name.toLowerCase();
+    let type = 'viewpoint';
+    if (lower.includes('combust') || lower.includes('gasol') || lower.includes('repsol') || lower.includes('galp')) type = 'fuel';
+    else if (lower.includes('hotel') || lower.includes('dormida') || lower.includes('chegada')) type = 'sleep';
+    else if (idx === 0) type = 'start';
+    return { name, type, lat, lng, km: 0 };
+  }).filter(w => !Number.isNaN(w.lat) && !Number.isNaN(w.lng));
+
+  // Se o GPX não tiver <wpt>, criar Partida e Chegada automáticas a partir das pontas do traçado
+  let totalDistM = 0;
+  for (let i = 1; i < routeCoords.length; i++) {
+    totalDistM += calcDistanceMeters(
+      routeCoords[i - 1][0], routeCoords[i - 1][1],
+      routeCoords[i][0], routeCoords[i][1]
+    );
+  }
+  const totalKm = Math.round(totalDistM / 1000);
+
+  const waypoints = parsedWaypoints.length >= 2
+    ? parsedWaypoints
+    : [
+        { name: `Partida: ${trkName}`, type: 'start', lat: routeCoords[0][0], lng: routeCoords[0][1], km: 0 },
+        { name: `Chegada: ${trkName}`, type: 'sleep', lat: routeCoords[routeCoords.length - 1][0], lng: routeCoords[routeCoords.length - 1][1], km: totalKm }
+      ];
+
+  // Atualizar marcos quilométricos nos waypoints
+  waypoints.forEach((wp, idx) => {
+    if (idx === 0) wp.km = 0;
+    else if (idx === waypoints.length - 1) wp.km = totalKm;
+    else {
+      // Encontrar distância acumulada mais próxima
+      let acc = 0;
+      let bestAcc = 0;
+      let bestD = Infinity;
+      for (let i = 1; i < routeCoords.length; i++) {
+        acc += calcDistanceMeters(routeCoords[i - 1][0], routeCoords[i - 1][1], routeCoords[i][0], routeCoords[i][1]);
+        const d = calcDistanceMeters(wp.lat, wp.lng, routeCoords[i][0], routeCoords[i][1]);
+        if (d < bestD) {
+          bestD = d;
+          bestAcc = acc;
+        }
+      }
+      wp.km = Math.round(bestAcc / 1000);
+    }
+  });
+
+  const tbtSteps = generateTurnStepsFromCoords(routeCoords, waypoints, minAngleDeg);
+
+  return {
+    id: `gpx-${Date.now()}`,
+    tripCode: `GPX-${Math.floor(100 + Math.random() * 900)}`,
+    profile: 'moto',
+    tripTitle: trkName,
+    stageSubtitle: `Rota GPX • ${totalKm} km • ${tbtSteps.length} manobras Turn-by-Turn detetadas`,
+    stageDistanceKm: totalKm,
+    odometerKm: activeTrip.odometerKm || 0,
+    tankCapacityL: activeTrip.tankCapacityL || 14.1,
+    avgConsumptionL100: activeTrip.avgConsumptionL100 || 3.8,
+    waypoints,
+    routeCoords,
+    tbtSteps,
+    expenses: []
+  };
+}
+
+function ensureTurnStepsReady() {
+  if (!activeTrip.tbtSteps || activeTrip.tbtSteps.length === 0) {
+    const sens = parseInt(document.getElementById('gpxTurnSensitivity')?.value || '42', 10);
+    if (activeTrip.routeCoords && activeTrip.routeCoords.length >= 2) {
+      activeTrip.tbtSteps = generateTurnStepsFromCoords(
+        activeTrip.routeCoords,
+        activeTrip.waypoints || [],
+        sens
+      );
+    }
+  }
+  // Começar na primeira viragem relevante (índice 1) se houver mais do que a partida
+  activeTbtIndex = (activeTrip.tbtSteps && activeTrip.tbtSteps.length > 1) ? 1 : 0;
 }
 
 function updateTurnByTurnPanel() {
-  const { wp, idx, nextWp } = getNextWaypointData();
+  const steps = activeTrip.tbtSteps || [];
   document.getElementById('tbtSpeedBig').textContent = currentSpeedKmh;
 
-  if (!wp) {
+  if (steps.length === 0) {
     document.getElementById('tbtArrow').textContent = '↑';
     document.getElementById('tbtDistance').textContent = '—';
-    document.getElementById('tbtInstruction').textContent = 'Sem pontos carregados';
-    document.getElementById('tbtNextPreview').textContent = 'Importa uma rota no separador Sync';
+    document.getElementById('tbtStepCounter').textContent = '0/0';
+    document.getElementById('tbtInstruction').textContent = 'Sem rota carregada';
+    document.getElementById('tbtNextPreview').textContent = 'Importa um ficheiro GPX no separador Sync / GPX';
     return;
   }
 
-  const { arrow, instruction, afterPreview } = inferManeuverFromWaypoint(wp, nextWp);
-  document.getElementById('tbtArrow').textContent = arrow;
-  document.getElementById('tbtInstruction').textContent = instruction;
-  document.getElementById('tbtNextPreview').textContent = afterPreview;
+  activeTbtIndex = Math.max(0, Math.min(activeTbtIndex, steps.length - 1));
+  const step = steps[activeTbtIndex];
+
+  document.getElementById('tbtArrow').textContent = step.arrow || '↑';
+  document.getElementById('tbtStepCounter').textContent = `Manobra ${activeTbtIndex + 1}/${steps.length}`;
+  document.getElementById('tbtInstruction').textContent = step.instruction;
+  document.getElementById('tbtNextPreview').textContent = step.afterPreview || 'Mantém trajetória';
 
   let distMeters = null;
-  if (currentCoords && wp.lat && wp.lng) {
-    distMeters = calcDistanceMeters(currentCoords[0], currentCoords[1], wp.lat, wp.lng);
+  if (currentCoords && step.lat && step.lng) {
+    distMeters = calcDistanceMeters(currentCoords[0], currentCoords[1], step.lat, step.lng);
     document.getElementById('tbtDistance').textContent = formatDistanceLabel(distMeters);
+
+    // Avanço automático se a mota já passou a menos de 45 metros da curva atual
+    if (distMeters <= 45 && activeTbtIndex < steps.length - 1) {
+      activeTbtIndex += 1;
+      updateTurnByTurnPanel();
+      return;
+    }
   } else {
-    // Fallback simulado pelo marco quilométrico do roadbook quando o GPS está desligado
-    const prevWp = idx > 0 ? activeTrip.waypoints[idx - 1] : { km: 0 };
-    const deltaKm = Math.max(0, (wp.km || 0) - (prevWp.km || 0));
-    document.getElementById('tbtDistance').textContent = deltaKm > 0 ? `${deltaKm} km` : '0 m';
+    // Sem GPS ligado, mostra a distância exata calculada pelo GPX desde a manobra anterior
+    document.getElementById('tbtDistance').textContent = formatDistanceLabel(step.legDistM || 0);
   }
 
-  // Disparo automático de voz ao aproximar-se de uma curva/ponto (< 600 m com GPS ativo)
-  if (autoVoiceEnabled && distMeters !== null && distMeters <= 600 && !announcedWpIndices.has(idx)) {
-    announcedWpIndices.add(idx);
-    speakInstruction(`A ${formatDistanceLabel(distMeters)}, ${instruction}. ${afterPreview}`);
+  // Disparo automático de voz ao aproximar-se de uma curva/ponto (< 500 m com GPS ativo)
+  if (autoVoiceEnabled && distMeters !== null && distMeters <= 500 && !announcedTbtIndices.has(activeTbtIndex)) {
+    announcedTbtIndices.add(activeTbtIndex);
+    speakInstruction(`A ${formatDistanceLabel(distMeters)}, ${step.instruction}. ${step.afterPreview}`);
   }
 }
 
@@ -290,6 +571,7 @@ function renderAllRoadUI() {
 function renderMap() {
   if (!map) return;
   routeLayer.clearLayers();
+  turnMarkersLayer.clearLayers();
   markersLayer.clearLayers();
 
   const coords = activeTrip.routeCoords && activeTrip.routeCoords.length > 1
@@ -301,6 +583,21 @@ function renderMap() {
     map.fitBounds(poly.getBounds(), { padding: [22, 22] });
   }
 
+  // Desenhar pontos discretos nas curvas detetadas do GPX
+  (activeTrip.tbtSteps || []).forEach((step, idx) => {
+    if (step.isWaypoint) return;
+    L.circleMarker([step.lat, step.lng], {
+      radius: 5,
+      color: '#111827',
+      weight: 2,
+      fillColor: '#f59e0b',
+      fillOpacity: 0.95
+    })
+      .bindPopup(`<strong>${step.arrow} Manobra ${idx + 1}</strong><br/>${step.instruction}`)
+      .addTo(turnMarkersLayer);
+  });
+
+  // Desenhar paragens principais
   (activeTrip.waypoints || []).forEach((wp, idx) => {
     const iconHtml = `<div style="font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.85))">${PIN_ICONS[wp.type] || '📍'}</div>`;
     const icon = L.divIcon({ html: iconHtml, className: 'road-pin', iconSize: [26, 26] });
@@ -315,7 +612,8 @@ function renderRoadbookList() {
   const wps = activeTrip.waypoints || [];
   listEl.innerHTML = '';
 
-  const { wp: nextWp } = getNextWaypointData();
+  const nextIdx = wps.findIndex((_, i) => !doneWps.includes(i));
+  const nextWp = nextIdx !== -1 ? wps[nextIdx] : wps[wps.length - 1];
   if (nextWp) {
     document.getElementById('nextWpTitle').textContent = `${PIN_ICONS[nextWp.type] || '📍'} ${nextWp.name}`;
     document.getElementById('nextWpDist').textContent = `Marco: Km ${nextWp.km}`;
@@ -340,7 +638,6 @@ function renderRoadbookList() {
       }
       saveRoadTrip();
       renderRoadbookList();
-      updateTurnByTurnPanel();
     });
     listEl.appendChild(row);
   });
@@ -459,10 +756,11 @@ async function pullTripByCodeFromSupabase() {
     }
     activeTrip = rows[0].payload;
     doneWps = [];
-    announcedWpIndices.clear();
+    announcedTbtIndices.clear();
+    ensureTurnStepsReady();
     saveRoadTrip();
     renderAllRoadUI();
-    fb.textContent = `✅ Viagem "${activeTrip.tripTitle}" carregada e pronta a rodar offline!`;
+    fb.textContent = `✅ Viagem "${activeTrip.tripTitle}" carregada (${activeTrip.tbtSteps.length} manobras geradas)!`;
   } catch (err) {
     fb.textContent = `❌ Erro de rede: ${err.message}`;
   }
@@ -531,10 +829,10 @@ function bindEvents() {
     e.target.textContent = autoVoiceEnabled ? '🔊 Voz: ON' : '🔇 Voz: OFF';
     document.getElementById('voiceStatusBadge').textContent = autoVoiceEnabled ? '🔊 Voz Auto: ON' : '🔇 Voz Auto: OFF';
     if (autoVoiceEnabled) {
-      const { wp, nextWp } = getNextWaypointData();
-      if (wp) {
-        const { instruction } = inferManeuverFromWaypoint(wp, nextWp);
-        speakInstruction(`Voz ativada. Próximo ponto: ${instruction}`);
+      const steps = activeTrip.tbtSteps || [];
+      const step = steps[activeTbtIndex];
+      if (step) {
+        speakInstruction(`Voz ativada. Próxima manobra: ${step.instruction}`);
       }
     } else if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -543,38 +841,83 @@ function bindEvents() {
 
   // Botão Turn-by-Turn: Repetir instrução no intercomunicador
   document.getElementById('btnTbtRepeatVoice').addEventListener('click', () => {
-    const { wp, nextWp } = getNextWaypointData();
-    if (!wp) return;
+    const steps = activeTrip.tbtSteps || [];
+    const step = steps[activeTbtIndex];
+    if (!step) return;
     const dist = document.getElementById('tbtDistance').textContent;
-    const { instruction, afterPreview } = inferManeuverFromWaypoint(wp, nextWp);
-    speakInstruction(`A ${dist}, ${instruction}. ${afterPreview}`);
+    speakInstruction(`A ${dist}, ${step.instruction}. ${step.afterPreview}`);
   });
 
-  // Botão Turn-by-Turn: Avançar para a próxima manobra do roadbook
-  document.getElementById('btnTbtNextStep').addEventListener('click', () => {
-    const { idx } = getNextWaypointData();
-    if (idx !== -1 && !doneWps.includes(idx)) {
-      doneWps.push(idx);
-      saveRoadTrip();
-      renderRoadbookList();
+  // Botão Turn-by-Turn: Manobra Anterior
+  document.getElementById('btnTbtPrevStep').addEventListener('click', () => {
+    if (activeTbtIndex > 0) {
+      activeTbtIndex -= 1;
       updateTurnByTurnPanel();
-      if (autoVoiceEnabled) {
-        const nextData = getNextWaypointData();
-        if (nextData.wp) {
-          const { instruction, afterPreview } = inferManeuverFromWaypoint(nextData.wp, nextData.nextWp);
-          speakInstruction(`Próxima manobra: ${instruction}. ${afterPreview}`);
-        }
+      const step = activeTrip.tbtSteps[activeTbtIndex];
+      if (step && map) map.panTo([step.lat, step.lng]);
+    }
+  });
+
+  // Botão Turn-by-Turn: Próxima Manobra (Curva / Cruzamento)
+  document.getElementById('btnTbtNextStep').addEventListener('click', () => {
+    const steps = activeTrip.tbtSteps || [];
+    if (activeTbtIndex < steps.length - 1) {
+      activeTbtIndex += 1;
+      updateTurnByTurnPanel();
+      const step = steps[activeTbtIndex];
+      if (step && map) map.panTo([step.lat, step.lng]);
+      if (autoVoiceEnabled && step) {
+        speakInstruction(`A ${formatDistanceLabel(step.legDistM)}, ${step.instruction}. ${step.afterPreview}`);
       }
     }
+  });
+
+  // Importar ficheiro GPX (.gpx) e gerar curvas Turn-by-Turn automaticamente
+  document.getElementById('roadGpxFileInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fb = document.getElementById('roadSyncFeedback');
+    try {
+      const xmlText = await file.text();
+      const sens = parseInt(document.getElementById('gpxTurnSensitivity').value || '42', 10);
+      activeTrip = parseGpxXml(xmlText, sens, file.name);
+      doneWps = [];
+      announcedTbtIndices.clear();
+      ensureTurnStepsReady();
+      saveRoadTrip();
+      renderAllRoadUI();
+      fb.textContent = `✅ GPX "${activeTrip.tripTitle}" importado! Foram geradas ${activeTrip.tbtSteps.length} instruções Turn-by-Turn com setas e distâncias.`;
+    } catch (err) {
+      fb.textContent = `❌ Erro ao ler GPX: ${err.message}`;
+    } finally {
+      e.target.value = '';
+    }
+  });
+
+  // Recalcular curvas se o utilizador alterar a sensibilidade
+  document.getElementById('gpxTurnSensitivity').addEventListener('change', () => {
+    if (!activeTrip.routeCoords || activeTrip.routeCoords.length < 2) return;
+    const sens = parseInt(document.getElementById('gpxTurnSensitivity').value || '42', 10);
+    activeTrip.tbtSteps = generateTurnStepsFromCoords(
+      activeTrip.routeCoords,
+      activeTrip.waypoints || [],
+      sens
+    );
+    activeTrip.stageSubtitle = `Rota • ${activeTrip.stageDistanceKm} km • ${activeTrip.tbtSteps.length} manobras Turn-by-Turn`;
+    announcedTbtIndices.clear();
+    ensureTurnStepsReady();
+    saveRoadTrip();
+    renderAllRoadUI();
+    document.getElementById('roadSyncFeedback').textContent = `🔄 Curvas recalculadas (${activeTrip.tbtSteps.length} manobras detetadas).`;
   });
 
   document.getElementById('btnToggleGps').addEventListener('click', toggleGps);
   document.getElementById('btnCenterRoute').addEventListener('click', renderMap);
 
   document.getElementById('btnShareCoords').addEventListener('click', () => {
-    const { wp } = getNextWaypointData();
-    const lat = currentCoords ? currentCoords[0] : wp?.lat;
-    const lng = currentCoords ? currentCoords[1] : wp?.lng;
+    const wps = activeTrip.waypoints || [];
+    const lat = currentCoords ? currentCoords[0] : wps[0]?.lat;
+    const lng = currentCoords ? currentCoords[1] : wps[0]?.lng;
     if (!lat || !lng) return;
     const msg = `MOTOATLAS (${activeTrip.tripCode}): https://maps.google.com/?q=${lat.toFixed(5)},${lng.toFixed(5)}`;
     if (navigator.share) {
@@ -627,10 +970,11 @@ ${msg}`);
     const parsed = JSON.parse(await file.text());
     activeTrip = parsed.trip ? parsed.trip : parsed;
     doneWps = [];
-    announcedWpIndices.clear();
+    announcedTbtIndices.clear();
+    ensureTurnStepsReady();
     saveRoadTrip();
     renderAllRoadUI();
-    document.getElementById('roadSyncFeedback').textContent = `✅ Viagem "${activeTrip.tripTitle}" importada do ficheiro!`;
+    document.getElementById('roadSyncFeedback').textContent = `✅ Viagem "${activeTrip.tripTitle}" importada (${activeTrip.tbtSteps.length} manobras)!`;
   });
 
   // Exportar ficheiro de retorno
